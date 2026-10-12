@@ -2,6 +2,7 @@
 #include "sha256.h"
 #include "sender.h"
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -41,11 +42,31 @@ typedef struct {
   time_t expires;
 } transfer_session;
 
+typedef struct {
+  char id[33];
+  struct in_addr peer;
+  transfer_file files[MAX_FILES];
+  int count;
+  time_t expires;
+} download_session;
+
 static transfer_session session;
+static download_session downloads;
 static char fingerprint[33];
+static char download_pin[7];
+static int pin_failures;
+static time_t pin_window;
 static char alias_name[96] = "PS5 LocalSend";
 static char output_dir[512] = "/data/localsend";
 static unsigned port = DEFAULT_PORT;
+
+#ifndef HOST_BUILD
+typedef struct {
+  char reserved[45];
+  char message[3075];
+} notify_request;
+int sceKernelSendNotificationRequest(int, notify_request *, size_t, int);
+#endif
 
 static void random_hex(char *out, size_t bytes) {
   static const char hex[] = "0123456789abcdef";
@@ -69,21 +90,26 @@ static int send_all(int fd, const void *buf, size_t len) {
   return 0;
 }
 
-static void reply(int fd, int code, const char *body) {
+static void reply_type(int fd, int code, const char *type, const char *body) {
   const char *reason = code == 200 ? "OK" : code == 204 ? "No Content" :
     code == 400 ? "Bad Request" : code == 403 ? "Forbidden" :
-    code == 404 ? "Not Found" : code == 409 ? "Conflict" :
+    code == 401 ? "Unauthorized" : code == 404 ? "Not Found" :
+    code == 409 ? "Conflict" : code == 429 ? "Too Many Requests" :
     code == 413 ? "Content Too Large" : code == 422 ? "Unprocessable Content" :
     code == 500 ? "Internal Server Error" : "Error";
   if (!body) body = "";
   char hdr[256];
   int n = snprintf(hdr, sizeof(hdr),
-    "HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\n"
-    "Content-Length: %zu\r\nConnection: close\r\n\r\n", code, reason, strlen(body));
+    "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n"
+    "Content-Length: %zu\r\nConnection: close\r\n\r\n", code, reason, type, strlen(body));
   if (n > 0 && (size_t)n < sizeof(hdr)) {
     send_all(fd, hdr, (size_t)n);
     send_all(fd, body, strlen(body));
   }
+}
+
+static void reply(int fd, int code, const char *body) {
+  reply_type(fd, code, "application/json; charset=utf-8", body);
 }
 
 static int info(char *out, size_t cap, int announce) {
@@ -92,7 +118,7 @@ static int info(char *out, size_t cap, int announce) {
   int n = snprintf(out, cap,
     "{\"alias\":\"%s\",\"version\":\"2.0\",\"deviceModel\":\"PlayStation 5\","
     "\"deviceType\":\"headless\",\"fingerprint\":\"%s\",\"port\":%u,"
-    "\"protocol\":\"http\",\"download\":false%s}",
+    "\"protocol\":\"http\",\"download\":true%s}",
     name, fingerprint, port, announce < 0 ? "" : announce ? ",\"announce\":true" : ",\"announce\":false");
   return n < 0 || (size_t)n >= cap ? -1 : n;
 }
@@ -292,6 +318,158 @@ static int write_file(int fd, const char *initial, size_t initial_len, uint64_t 
   return status;
 }
 
+static int check_pin(const char *query) {
+  time_t now = time(NULL);
+  if (now - pin_window >= 60) { pin_window = now; pin_failures = 0; }
+  if (pin_failures >= 5) return 429;
+  char entered[32];
+  if (!query || query_value(query, "pin", entered, sizeof(entered)) < 0 ||
+      strcmp(entered, download_pin)) {
+    ++pin_failures;
+    return 401;
+  }
+  pin_failures = 0;
+  return 200;
+}
+
+static int create_download_session(struct in_addr peer) {
+  if (downloads.count && time(NULL) < downloads.expires) {
+    if (downloads.peer.s_addr == peer.s_addr) return 200;
+    return 409;
+  }
+  memset(&downloads, 0, sizeof(downloads));
+  downloads.peer = peer;
+  downloads.expires = time(NULL) + 600;
+  random_hex(downloads.id, 16);
+  DIR *dir = opendir(output_dir);
+  if (!dir) return 500;
+  struct dirent *entry;
+  while (downloads.count < MAX_FILES && (entry = readdir(dir))) {
+    if (entry->d_name[0] == '.') continue;
+    transfer_file *f = &downloads.files[downloads.count];
+    size_t name_len = strlen(entry->d_name);
+    if (name_len >= sizeof(f->name)) continue;
+    char path[1024];
+    if (snprintf(path, sizeof(path), "%s/%s", output_dir, entry->d_name) >= (int)sizeof(path)) continue;
+    struct stat st;
+    if (lstat(path, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0) continue;
+    memcpy(f->name, entry->d_name, name_len + 1);
+    f->size = (uint64_t)st.st_size;
+    random_hex(f->id, 16);
+    ++downloads.count;
+  }
+  closedir(dir);
+  return 200;
+}
+
+static int download_metadata(char *out, size_t cap) {
+  char device[512];
+  if (info(device, sizeof(device), -1) < 0) return -1;
+  int n = snprintf(out, cap, "{\"info\":%s,\"sessionId\":\"%s\",\"files\":{",
+                   device, downloads.id);
+  if (n < 0 || (size_t)n >= cap) return -1;
+  size_t used = (size_t)n;
+  for (int i = 0; i < downloads.count; ++i) {
+    char name[768];
+    transfer_file *f = &downloads.files[i];
+    if (json_escape(f->name, name, sizeof(name)) < 0) return -1;
+    n = snprintf(out + used, cap - used,
+      "%s\"%s\":{\"id\":\"%s\",\"fileName\":\"%s\",\"size\":%" PRIu64
+      ",\"fileType\":\"application/octet-stream\"}",
+      i ? "," : "", f->id, f->id, name, f->size);
+    if (n < 0 || (size_t)n >= cap - used) return -1;
+    used += (size_t)n;
+  }
+  if (used + 3 > cap) return -1;
+  memcpy(out + used, "}}", 3);
+  return 0;
+}
+
+static int html_escape(const char *input, char *out, size_t cap) {
+  size_t used = 0;
+  for (const char *p = input; *p; ++p) {
+    const char *replacement = *p == '&' ? "&amp;" : *p == '<' ? "&lt;" :
+      *p == '>' ? "&gt;" : *p == '"' ? "&quot;" : *p == '\'' ? "&#39;" : NULL;
+    size_t len = replacement ? strlen(replacement) : 1;
+    if (used + len >= cap) return -1;
+    if (replacement) memcpy(out + used, replacement, len);
+    else out[used] = *p;
+    used += len;
+  }
+  out[used] = 0;
+  return 0;
+}
+
+static void browser_page(int fd, const char *query, struct in_addr peer) {
+  static const char form[] =
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>PS5 LocalSend</title><h1>PS5 LocalSend</h1>"
+    "<form><label>PIN <input name=pin type=password inputmode=numeric pattern='[0-9]{6}' required>"
+    "</label><button>Show files</button></form>";
+  if (!query) { reply_type(fd, 200, "text/html; charset=utf-8", form); return; }
+  int code = check_pin(query);
+  if (code != 200) { reply_type(fd, code, "text/html; charset=utf-8", form); return; }
+  code = create_download_session(peer);
+  if (code != 200) { reply(fd, code, NULL); return; }
+  char page[32768];
+  size_t used = 0;
+  int n = snprintf(page, sizeof(page),
+    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>PS5 LocalSend</title><h1>PS5 LocalSend</h1><p>Files available for download:</p><ul>");
+  if (n < 0 || (size_t)n >= sizeof(page)) { reply(fd, 500, NULL); return; }
+  used = (size_t)n;
+  for (int i = 0; i < downloads.count; ++i) {
+    char name[1536];
+    transfer_file *f = &downloads.files[i];
+    if (html_escape(f->name, name, sizeof(name)) < 0) continue;
+    n = snprintf(page + used, sizeof(page) - used,
+      "<li><a href='/api/localsend/v2/download?sessionId=%s&amp;fileId=%s'>%s</a> (%" PRIu64 " bytes)</li>",
+      downloads.id, f->id, name, f->size);
+    if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
+    used += (size_t)n;
+  }
+  if (used + 6 > sizeof(page)) { reply(fd, 500, NULL); return; }
+  memcpy(page + used, "</ul>", 6);
+  reply_type(fd, 200, "text/html; charset=utf-8", page);
+}
+
+static void serve_download(int fd, const char *query, struct in_addr peer) {
+  char sid[64], id[64];
+  if (!query || query_value(query, "sessionId", sid, sizeof(sid)) < 0 ||
+      query_value(query, "fileId", id, sizeof(id)) < 0) { reply(fd, 400, NULL); return; }
+  if (!downloads.count || time(NULL) > downloads.expires ||
+      peer.s_addr != downloads.peer.s_addr || strcmp(sid, downloads.id)) {
+    reply(fd, 403, NULL); return;
+  }
+  transfer_file *f = NULL;
+  for (int i = 0; i < downloads.count; ++i)
+    if (!strcmp(id, downloads.files[i].id)) f = &downloads.files[i];
+  if (!f) { reply(fd, 404, NULL); return; }
+  char path[1024];
+  if (snprintf(path, sizeof(path), "%s/%s", output_dir, f->name) >= (int)sizeof(path)) {
+    reply(fd, 500, NULL); return;
+  }
+  int file = open(path, O_RDONLY | O_NOFOLLOW);
+  struct stat st;
+  if (file < 0 || fstat(file, &st) < 0 || !S_ISREG(st.st_mode) ||
+      st.st_size < 0 || (uint64_t)st.st_size != f->size) {
+    if (file >= 0) close(file);
+    reply(fd, 409, NULL); return;
+  }
+  char hdr[256];
+  int n = snprintf(hdr, sizeof(hdr),
+    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+    "Content-Length: %" PRIu64 "\r\nConnection: close\r\n\r\n", f->size);
+  if (n > 0 && (size_t)n < sizeof(hdr) && send_all(fd, hdr, (size_t)n) == 0) {
+    char chunk[CHUNK];
+    for (;;) {
+      ssize_t got = read(file, chunk, sizeof(chunk));
+      if (got <= 0 || send_all(fd, chunk, (size_t)got) < 0) break;
+    }
+  }
+  close(file);
+}
+
 static void handle_http(int fd, struct in_addr peer) {
   struct timeval timeout = {.tv_sec = 15};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -318,6 +496,23 @@ static void handle_http(int fd, struct in_addr peer) {
   *line = '\r';
   char *query = strchr(target, '?');
   if (query) *query++ = 0;
+  if (!strcmp(method, "GET") && !strcmp(target, "/")) {
+    browser_page(fd, query, peer);
+    return;
+  }
+  if (!strcmp(method, "POST") && !strcmp(target, "/api/localsend/v2/prepare-download")) {
+    int status = check_pin(query);
+    if (status == 200) status = create_download_session(peer);
+    if (status != 200) { reply(fd, status, NULL); return; }
+    char body[32768];
+    if (download_metadata(body, sizeof(body)) < 0) { reply(fd, 500, NULL); return; }
+    reply(fd, 200, body);
+    return;
+  }
+  if (!strcmp(method, "GET") && !strcmp(target, "/api/localsend/v2/download")) {
+    serve_download(fd, query, peer);
+    return;
+  }
   if (!strcmp(method, "GET") && !strcmp(target, "/api/localsend/v2/info")) {
     char body[512];
     if (info(body, sizeof(body), -1) >= 0) reply(fd, 200, body);
@@ -400,18 +595,29 @@ int main(int argc, char **argv) {
   }
   random_hex(fingerprint, 16);
   if (argc > 1) {
-    if (argc != 4 && argc != 5) {
-      fprintf(stderr, "Usage: %s --send FILE PEER_IPV4 [PORT]\n", argv[0]);
+    if (argc < 4 || argc > 6) {
+      fprintf(stderr, "Usage: %s --send FILE PEER_IPV4 [PORT] [--https]\n", argv[0]);
       return 1;
     }
     if (strcmp(argv[1], "--send")) return 1;
     unsigned remote_port = DEFAULT_PORT;
-    if (argc == 5) {
+    int secure = (argc >= 5 && !strcmp(argv[argc-1], "--https"));
+    if (argc == 6 && !secure) return 1;
+    if (argc >= 5 && strcmp(argv[4], "--https")) {
       char *end; unsigned long n = strtoul(argv[4], &end, 10);
       if (*end || n == 0 || n > 65535) return 1;
       remote_port = (unsigned)n;
     }
-    return send_file_to_peer(argv[2], argv[3], remote_port, alias_name, fingerprint, port);
+    return send_file_to_peer(argv[2], argv[3], remote_port, alias_name, fingerprint, port, secure);
+  }
+  v = getenv("LOCALSEND_PIN");
+  if (v && *v) {
+    if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
+      fprintf(stderr, "LOCALSEND_PIN must be six digits\n"); return 1;
+    }
+    strcpy(download_pin, v);
+  } else {
+    snprintf(download_pin, sizeof(download_pin), "%06u", (unsigned)arc4random_uniform(1000000));
   }
   if (mkdir(output_dir, 0700) < 0 && errno != EEXIST) {
     perror("LocalSend output directory"); return 1;
@@ -437,6 +643,12 @@ int main(int argc, char **argv) {
   struct sockaddr_in multicast = {.sin_family=AF_INET, .sin_port=htons((uint16_t)port)};
   inet_pton(AF_INET, GROUP, &multicast.sin_addr);
   printf("PS5 LocalSend listening on port %u, saving to %s\n", port, output_dir);
+  printf("PS5 LocalSend download PIN: %s\n", download_pin);
+#ifndef HOST_BUILD
+  notify_request notice = {0};
+  snprintf(notice.message, sizeof(notice.message), "PS5 LocalSend download PIN: %s", download_pin);
+  sceKernelSendNotificationRequest(0, &notice, sizeof(notice), 0);
+#endif
   time_t last = 0;
   for (;;) {
     time_t now = time(NULL);

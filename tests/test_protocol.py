@@ -21,7 +21,7 @@ class ProtocolTest(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             cls.port = sock.getsockname()[1]
         env = os.environ.copy()
-        env.update(LOCALSEND_DIR=cls.tmp.name, LOCALSEND_PORT=str(cls.port))
+        env.update(LOCALSEND_DIR=cls.tmp.name, LOCALSEND_PORT=str(cls.port), LOCALSEND_PIN="123456")
         cls.process = subprocess.Popen(
             [str(ROOT / "ps5-localsend.elf")], env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -98,6 +98,25 @@ class ProtocolTest(unittest.TestCase):
         found = list(pathlib.Path(self.tmp.name).glob("*-outgoing.txt"))
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].read_bytes(), source.read_bytes())
+
+    def test_pin_protected_download(self):
+        status, _ = self.request("POST", "/api/localsend/v2/prepare-download?pin=000000")
+        self.assertEqual(status, 401)
+        status, body = self.request("POST", "/api/localsend/v2/prepare-download?pin=123456")
+        self.assertEqual(status, 200)
+        listing = json.loads(body)
+        self.assertTrue(listing["info"]["download"])
+        self.assertTrue(listing["files"])
+        file_id, metadata = next(iter(listing["files"].items()))
+        status, payload = self.request(
+            "GET", f"/api/localsend/v2/download?sessionId={listing['sessionId']}&fileId={file_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload), metadata["size"])
+        self.assertEqual(payload, (pathlib.Path(self.tmp.name) / metadata["fileName"]).read_bytes())
+        status, page = self.request("GET", "/?pin=123456")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Files available for download", page)
 
     def test_wrong_token_rejected(self):
         path = self.prepare("secret.bin", b"abc")
