@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (C) 2026 heydemoura */
 #include "sender.h"
 #include "json.h"
 #include "sha256.h"

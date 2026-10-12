@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 heydemoura
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 
 ifeq ($(HOST),1)

@@ -46,6 +46,10 @@ GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a 
 
 `make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, PIN checks, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, and the Media tile was confirmed to open the control page on hardware. Compatibility with the official LocalSend app still needs another device test after its earlier HTTP 400 response.
 
-## License
+## License and source
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Copyright (C) 2026 heydemoura. The combined payload, including the original Media icon, is distributed under **GPL-3.0-only**; see [LICENSE](LICENSE). The Media launcher adapts GPL-licensed code from other PS5 projects. Their attribution and the SDK's license are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+This is an independent LocalSend protocol implementation and is not affiliated with the LocalSend maintainers or Sony Interactive Entertainment. It uses no LocalSend app code, logo, or artwork.
+
+When distributing the ELF, provide the corresponding source from the same release tag and follow [RELEASING.md](RELEASING.md). Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).

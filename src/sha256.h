@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (C) 2026 heydemoura */
 #ifndef LS_SHA256_H
 #define LS_SHA256_H
 #include <stddef.h>

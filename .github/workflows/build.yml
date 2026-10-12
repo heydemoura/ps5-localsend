@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 heydemoura
 name: Build PS5 payload
 
 on:
@@ -52,4 +54,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" ps5-localsend.elf ps5-localsend.elf.sha256 --clobber
+        run: |
+          {
+            printf '%s\n' 'ps5-localsend ELF source and license'
+            printf '%s\n' 'License: GPL-3.0-only'
+            printf 'This release source: https://github.com/%s/archive/refs/tags/%s.tar.gz\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+            printf '%s\n' 'PS5 payload SDK v0.44 source: https://github.com/ps5-payload-dev/sdk/archive/refs/tags/v0.44.tar.gz'
+            printf '%s\n' 'See LICENSE, THIRD_PARTY_NOTICES.md, README.md, and RELEASING.md in the release source.'
+          } > ps5-localsend.elf.SOURCE.txt
+          gh release upload "$RELEASE_TAG" ps5-localsend.elf ps5-localsend.elf.sha256 ps5-localsend.elf.SOURCE.txt --clobber

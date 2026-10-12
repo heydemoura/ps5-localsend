@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- Copyright (C) 2026 heydemoura -->
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="112" fill="#1565c0"/>
   <path d="M113 165h198l-38-38 25-25 83 83-83 83-25-25 38-38H113z" fill="#fff"/>

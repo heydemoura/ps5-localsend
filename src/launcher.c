@@ -1,3 +1,7 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (C) 2026 heydemoura */
+/* Media launcher adapted from kvnhrt/ps5-browser-app and
+ * owendswang/ps5-web-file-manager; see THIRD_PARTY_NOTICES.md. */
 #include "launcher.h"
 #include <errno.h>
 #include <ps5/kernel.h>

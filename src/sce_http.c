@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (C) 2026 heydemoura */
 #include "sce_http.h"
 #include <stdint.h>
 #include <stdio.h>
