@@ -10,7 +10,7 @@ A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https:/
 - Command-line sending to HTTP or HTTPS LocalSend peers with the standard prepare/upload flow. HTTPS uses the PS5's `libSceHttp`.
 - PIN-protected LocalSend `/prepare-download` and `/download` API, plus a responsive browser dashboard for downloading PS5 files and sending them to a discovered peer or a manually entered IPv4 address.
 
-HTTPS receiving, approval for incoming uploads, and an on-console user interface are not implemented yet. The payload advertises `protocol: http` and `download: true`; clients sending to it must support unencrypted LocalSend peers. HTTPS outbound mode accepts self-signed peer certificates without verifying a remembered fingerprint. Use only on a trusted LAN. This is an independent native protocol implementation rather than a build of LocalSend's Flutter interface.
+HTTPS receiving, approval for incoming uploads, and an on-console user interface are not implemented yet. The payload advertises `protocol: http`; it advertises `download: true` after PIN setup. Clients sending to it must support unencrypted LocalSend peers. HTTPS outbound mode accepts self-signed peer certificates without verifying a remembered fingerprint. Use only on a trusted LAN. This is an independent native protocol implementation rather than a build of LocalSend's Flutter interface.
 
 ## Build
 
@@ -42,16 +42,16 @@ The port is optional and defaults to 53317. Omit `--https` to send to a peer usi
 
 ## Releases
 
-GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a new PS5 ELF with the pinned SDK and attaches the ELF, SHA-256 checksum, GPLv3 text, third-party notices, and source directions to that release.
+GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a new PS5 ELF with the pinned SDK and attaches the ELF, SHA-256 checksum, GPLv3 text, third-party notices, LocalSend's Apache-2.0 license texts, and source directions to that release.
 
 ## Validation
 
-`make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, first-run PIN setup and persistence, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, and the Media tile was confirmed to open the control page on hardware. The official LocalSend app successfully sent an image to the PS5 in a prior build; the new dashboard still needs a PS5 browser check.
+`make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, first-run PIN setup and persistence, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, the Media tile opened the dashboard, first-run PIN setup worked on hardware, and the official LocalSend app successfully sent an image in a prior build.
 
 ## License and source
 
-Copyright (C) 2026 heydemoura. The combined payload, including the original Media icon, is distributed under **GPL-3.0-only**; see [LICENSE](LICENSE). The Media launcher adapts GPL-licensed code from other PS5 projects. Their attribution and the SDK's license are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Copyright (C) 2026 heydemoura. The project code is distributed under **GPL-3.0-only**; see [LICENSE](LICENSE). The official LocalSend icon is included under Apache-2.0, with the original copyright and license retained. The dashboard uses the official website's light and dark color values. Asset provenance, licensing, the adapted Media launcher, and the SDK's license are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-This is an independent LocalSend protocol implementation and is not affiliated with the LocalSend maintainers or Sony Interactive Entertainment. The embedded dashboard is original project code. It uses no LocalSend app or web app code, logo, or artwork.
+This is an independent LocalSend protocol implementation and is not affiliated with or endorsed by the LocalSend maintainers or Sony Interactive Entertainment. The embedded dashboard is original project code; no LocalSend app or web app code was copied.
 
 When distributing the ELF, provide the corresponding source from the same release tag and follow [RELEASING.md](RELEASING.md). Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).

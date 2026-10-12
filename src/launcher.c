@@ -3,6 +3,7 @@
 /* Media launcher adapted from kvnhrt/ps5-browser-app and
  * owendswang/ps5-web-file-manager; see THIRD_PARTY_NOTICES.md. */
 #include "launcher.h"
+#include "assets.h"
 #include <errno.h>
 #include <ps5/kernel.h>
 #include <stdint.h>
@@ -14,17 +15,6 @@
 #define TITLE_ID "LSND53317"
 #define APP_DIR "/user/app/" TITLE_ID
 #define SYS_DIR APP_DIR "/sce_sys"
-
-__asm__(".section .rodata\n"
-        ".global localsend_icon\n"
-        ".global localsend_icon_end\n"
-        ".align 16\n"
-        "localsend_icon:\n"
-        ".incbin \"assets/icon0.png\"\n"
-        "localsend_icon_end:\n"
-        ".previous\n");
-extern const unsigned char localsend_icon[];
-extern const unsigned char localsend_icon_end[];
 
 int sceAppInstUtilInitialize(void);
 int sceAppInstUtilTerminate(void);

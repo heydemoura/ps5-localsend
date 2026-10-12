@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Copyright (C) 2026 heydemoura */
 #include "json.h"
+#include "assets.h"
 #include "sha256.h"
 #include "sender.h"
 #include "webui.inc"
@@ -161,6 +162,16 @@ static void reply_type(int fd, int code, const char *type, const char *body) {
 
 static void reply(int fd, int code, const char *body) {
   reply_type(fd, code, "application/json; charset=utf-8", body);
+}
+
+static void reply_icon(int fd) {
+  size_t size = (size_t)((uintptr_t)localsend_icon_end - (uintptr_t)localsend_icon);
+  char header[192];
+  int n = snprintf(header, sizeof(header),
+    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n"
+    "Content-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", size);
+  if (n > 0 && (size_t)n < sizeof(header) && send_all(fd, header, (size_t)n) == 0)
+    send_all(fd, localsend_icon, size);
 }
 
 static int info(char *out, size_t cap, int announce) {
@@ -753,6 +764,10 @@ static void handle_http(int fd, struct in_addr peer) {
   if (query) *query++ = 0;
   if (!strcmp(method, "GET") && !strcmp(target, "/")) {
     reply_type(fd, 200, "text/html; charset=utf-8", webui_html);
+    return;
+  }
+  if (!strcmp(method, "GET") && !strcmp(target, "/icon.png")) {
+    reply_icon(fd);
     return;
   }
   if (!strcmp(method, "GET") && !strcmp(target, "/api/ui/status")) {

@@ -11,7 +11,7 @@ LDADD += -lSceHttp -lSceSsl -lSceSystemService -lSceAppInstUtil
 endif
 
 TARGET := ps5-localsend.elf
-SOURCES := src/main.c src/json.c src/sha256.c src/sender.c
+SOURCES := src/main.c src/assets.c src/json.c src/sha256.c src/sender.c
 ifneq ($(HOST),1)
 SOURCES += src/sce_http.c src/launcher.c
 endif

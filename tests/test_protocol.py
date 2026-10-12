@@ -74,6 +74,13 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(info["deviceModel"], "PlayStation 5")
             self.assertEqual(info["alias"], socket.gethostname())
 
+    def test_official_icon_is_served_without_pin(self):
+        status, body = self.request("GET", "/icon.png")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, (ROOT / "assets" / "icon0.png").read_bytes())
+        self.assertEqual(hashlib.sha256(body).hexdigest(),
+                         "d7e6016dd11ff9ce48ed6f1f24d8090b85d70982a450f1f1e51943739e166a48")
+
     def test_chunked_upload(self):
         content = b"official client chunked upload\x00" * 1500
         path = self.prepare("chunked.bin", content, hashlib.sha256(content).hexdigest())
@@ -212,7 +219,7 @@ class ProtocolTest(unittest.TestCase):
         status, page = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn(b"Set a PIN to enable transfers", page)
-        self.assertIn(b"GPL-3.0-only; no warranty", page)
+        self.assertIn(b"Code GPL-3.0-only; official logo Apache-2.0", page)
         status, listing = self.request("POST", "/api/ui/list", b"pin=123456")
         self.assertEqual(status, 200)
         self.assertIn(b"files", listing)
@@ -257,7 +264,7 @@ class ProtocolTest(unittest.TestCase):
                 self.assertNotEqual(outbound.returncode, 0)
                 self.assertIn("Set a LocalSend PIN", outbound.stderr)
                 for method, path, body in [
-                    ("POST", "/api/localsend/v2/prepare-upload", b"{}"),
+                    ("POST", "/api/localsend/v2/prepare-upload", b""),
                     ("POST", "/api/localsend/v2/upload", b""),
                     ("POST", "/api/localsend/v2/prepare-download?pin=123456", b""),
                     ("GET", "/api/localsend/v2/download", None),
