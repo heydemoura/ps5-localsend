@@ -87,6 +87,18 @@ class ProtocolTest(unittest.TestCase):
         sid = path.split("sessionId=")[1].split("&")[0]
         self.request("POST", f"/api/localsend/v2/cancel?sessionId={sid}")
 
+    def test_command_line_send_to_peer(self):
+        source = pathlib.Path(self.tmp.name) / "outgoing.txt"
+        source.write_bytes(b"from PS5 to peer" * 100)
+        result = subprocess.run(
+            [str(ROOT / "ps5-localsend.elf"), "--send", str(source), "127.0.0.1", str(self.port)],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        found = list(pathlib.Path(self.tmp.name).glob("*-outgoing.txt"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].read_bytes(), source.read_bytes())
+
     def test_wrong_token_rejected(self):
         path = self.prepare("secret.bin", b"abc")
         status, _ = self.request("POST", path.split("&token=")[0] + "&token=wrong", b"abc")

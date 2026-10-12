@@ -7,7 +7,7 @@ include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 endif
 
 TARGET := ps5-localsend.elf
-SOURCES := src/main.c src/json.c src/sha256.c
+SOURCES := src/main.c src/json.c src/sha256.c src/sender.c
 CFLAGS += -std=c11 -O2 -Wall -Wextra -Werror -D_DEFAULT_SOURCE -Isrc
 
 .PHONY: all clean test

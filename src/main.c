@@ -1,10 +1,12 @@
 #include "json.h"
 #include "sha256.h"
+#include "sender.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -384,7 +386,8 @@ static void announce(int udp, const struct sockaddr_in *destination, int mode) {
                     (const struct sockaddr *)destination, sizeof(*destination));
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  signal(SIGPIPE, SIG_IGN);
   const char *v = getenv("LOCALSEND_DIR");
   if (v && *v && strlen(v) < sizeof(output_dir)) strcpy(output_dir, v);
   v = getenv("LOCALSEND_ALIAS");
@@ -396,6 +399,20 @@ int main(void) {
     port = (unsigned)n;
   }
   random_hex(fingerprint, 16);
+  if (argc > 1) {
+    if (argc != 4 && argc != 5) {
+      fprintf(stderr, "Usage: %s --send FILE PEER_IPV4 [PORT]\n", argv[0]);
+      return 1;
+    }
+    if (strcmp(argv[1], "--send")) return 1;
+    unsigned remote_port = DEFAULT_PORT;
+    if (argc == 5) {
+      char *end; unsigned long n = strtoul(argv[4], &end, 10);
+      if (*end || n == 0 || n > 65535) return 1;
+      remote_port = (unsigned)n;
+    }
+    return send_file_to_peer(argv[2], argv[3], remote_port, alias_name, fingerprint, port);
+  }
   if (mkdir(output_dir, 0700) < 0 && errno != EEXIST) {
     perror("LocalSend output directory"); return 1;
   }
