@@ -3,6 +3,7 @@
 #include "json.h"
 #include "sha256.h"
 #include "sender.h"
+#include "webui.inc"
 #ifndef HOST_BUILD
 #include "launcher.h"
 #endif
@@ -75,6 +76,7 @@ static download_session downloads;
 static discovered_peer peers[MAX_PEERS];
 static char fingerprint[33];
 static char download_pin[7];
+static int pin_configured;
 static int pin_failures;
 static time_t pin_window;
 static char alias_name[96];
@@ -167,8 +169,9 @@ static int info(char *out, size_t cap, int announce) {
   int n = snprintf(out, cap,
     "{\"alias\":\"%s\",\"version\":\"2.0\",\"deviceModel\":\"PlayStation 5\","
     "\"deviceType\":\"headless\",\"fingerprint\":\"%s\",\"port\":%u,"
-    "\"protocol\":\"http\",\"download\":true%s}",
-    name, fingerprint, port, announce < 0 ? "" : announce ? ",\"announce\":true" : ",\"announce\":false");
+    "\"protocol\":\"http\",\"download\":%s%s}",
+    name, fingerprint, port, pin_configured ? "true" : "false",
+    announce < 0 ? "" : announce ? ",\"announce\":true" : ",\"announce\":false");
   return n < 0 || (size_t)n >= cap ? -1 : n;
 }
 
@@ -213,6 +216,29 @@ static int parse_framing(const char *headers, uint64_t *length, int *chunked) {
 static int parse_content_length(const char *headers, uint64_t *length) {
   int chunked;
   return parse_framing(headers, length, &chunked) < 0 || chunked ? -1 : 0;
+}
+
+static int header_is(const char *headers, const char *name, const char *value) {
+  const char *p = strstr(headers, "\r\n");
+  if (!p) return 0;
+  p += 2;
+  size_t name_len = strlen(name), value_len = strlen(value);
+  while (*p && !(p[0] == '\r' && p[1] == '\n')) {
+    const char *end = strstr(p, "\r\n");
+    if (!end) break;
+    const char *colon = memchr(p, ':', (size_t)(end-p));
+    if (colon && (size_t)(colon-p) == name_len &&
+        !strncasecmp(p, name, name_len)) {
+      const char *v = colon + 1;
+      while (v < end && (*v == ' ' || *v == '\t')) ++v;
+      while (end > v && (end[-1] == ' ' || end[-1] == '\t')) --end;
+      if ((size_t)(end-v) == value_len && !memcmp(v, value, value_len)) return 1;
+    }
+    p = strstr(p, "\r\n");
+    if (!p) break;
+    p += 2;
+  }
+  return 0;
 }
 
 static int query_value(const char *query, const char *key, char *out, size_t cap) {
@@ -451,6 +477,7 @@ static int write_file(int fd, const char *initial, size_t initial_len, uint64_t 
 }
 
 static int check_pin(const char *query) {
+  if (!pin_configured) return 403;
   time_t now = time(NULL);
   if (now - pin_window >= 60) { pin_window = now; pin_failures = 0; }
   if (pin_failures >= 5) return 429;
@@ -462,6 +489,40 @@ static int check_pin(const char *query) {
   }
   pin_failures = 0;
   return 200;
+}
+
+static int pin_file_path(char *path, size_t cap) {
+  int n = snprintf(path, cap, "%s/.pin", output_dir);
+  return n < 0 || (size_t)n >= cap ? -1 : 0;
+}
+
+static int load_pin(void) {
+  char path[sizeof(output_dir) + 8];
+  if (pin_file_path(path, sizeof(path)) < 0) return -1;
+  int fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) return errno == ENOENT ? 0 : -1;
+  char value[8] = {0};
+  ssize_t n = read(fd, value, sizeof(value));
+  close(fd);
+  if (n != 6 || strspn(value, "0123456789") != 6) return -1;
+  memcpy(download_pin, value, 6);
+  download_pin[6] = 0;
+  pin_configured = 1;
+  return 0;
+}
+
+static int save_pin(const char *value) {
+  char path[sizeof(output_dir) + 8];
+  if (pin_file_path(path, sizeof(path)) < 0) return -1;
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  if (fd < 0) return -1;
+  int ok = write(fd, value, 6) == 6 && fsync(fd) == 0;
+  if (close(fd) != 0) ok = 0;
+  if (!ok) { unlink(path); return -1; }
+  memcpy(download_pin, value, 6);
+  download_pin[6] = 0;
+  pin_configured = 1;
+  return 0;
 }
 
 static int create_download_session(struct in_addr peer, const char *requested_id) {
@@ -517,78 +578,35 @@ static int download_metadata(char *out, size_t cap) {
   return 0;
 }
 
-static int html_escape(const char *input, char *out, size_t cap) {
-  size_t used = 0;
-  for (const char *p = input; *p; ++p) {
-    const char *replacement = *p == '&' ? "&amp;" : *p == '<' ? "&lt;" :
-      *p == '>' ? "&gt;" : *p == '"' ? "&quot;" : *p == '\'' ? "&#39;" : NULL;
-    size_t len = replacement ? strlen(replacement) : 1;
-    if (used + len >= cap) return -1;
-    if (replacement) memcpy(out + used, replacement, len);
-    else out[used] = *p;
-    used += len;
-  }
-  out[used] = 0;
-  return 0;
-}
-
-static void browser_page(int fd, const char *query, struct in_addr peer) {
-#define LEGAL_NOTICE "<footer><small>Copyright (C) 2026 heydemoura. " \
-  "GPL-3.0-only; no warranty. <a href='https://github.com/heydemoura/ps5-localsend/blob/main/LICENSE'>" \
-  "License and source</a>.</small></footer>"
-  static const char form[] =
-    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>PS5 LocalSend</title><h1>PS5 LocalSend</h1>"
-    "<form><label>PIN <input name=pin type=password inputmode=numeric pattern='[0-9]{6}' required>"
-    "</label><button>Show files</button></form>" LEGAL_NOTICE;
-  if (!query) { reply_type(fd, 200, "text/html; charset=utf-8", form); return; }
-  int code = check_pin(query);
-  if (code != 200) { reply_type(fd, code, "text/html; charset=utf-8", form); return; }
-  code = create_download_session(peer, NULL);
-  if (code != 200) { reply(fd, code, NULL); return; }
-  static char page[131072];
-  size_t used = 0;
-  int n = snprintf(page, sizeof(page),
-    "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>PS5 LocalSend</title><h1>PS5 LocalSend</h1><p>Files available for download:</p><ul>");
-  if (n < 0 || (size_t)n >= sizeof(page)) { reply(fd, 500, NULL); return; }
-  used = (size_t)n;
-  for (int i = 0; i < downloads.count; ++i) {
-    char name[1536];
-    transfer_file *f = &downloads.files[i];
-    if (html_escape(f->name, name, sizeof(name)) < 0) continue;
-    n = snprintf(page + used, sizeof(page) - used,
-      "<li><a href='/api/localsend/v2/download?sessionId=%s&amp;fileId=%s'>%s</a> (%" PRIu64 " bytes)"
-      "<form method=post action='/send?sessionId=%s&amp;fileId=%s'>"
-      "<label>Discovered peer <select name=target><option value=''>Manual address</option>",
-      downloads.id, f->id, name, f->size, downloads.id, f->id);
-    if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
-    used += (size_t)n;
-    for (int j = 0; j < MAX_PEERS; ++j) {
-      discovered_peer *p = &peers[j];
-      if (!p->fingerprint[0] || time(NULL) - p->seen > 120) continue;
-      char id_html[512], alias_html[512], ip[INET_ADDRSTRLEN];
-      if (html_escape(p->fingerprint, id_html, sizeof(id_html)) < 0 ||
-          html_escape(p->alias, alias_html, sizeof(alias_html)) < 0 ||
-          !inet_ntop(AF_INET, &p->address, ip, sizeof(ip))) continue;
-      n = snprintf(page + used, sizeof(page) - used,
-        "<option value='%s'>%s (%s:%u %s)</option>", id_html, alias_html,
-        ip, p->port, p->secure ? "HTTPS" : "HTTP");
-      if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
-      used += (size_t)n;
-    }
-    n = snprintf(page + used, sizeof(page) - used,
-      "</select></label><label>IPv4 <input name=peer></label>"
-      "<label>Port <input name=port type=number min=1 max=65535 value=53317></label>"
-      "<label><input name=secure type=checkbox value=1> HTTPS for manual address</label>"
-      "<button>Send</button></form></li>");
-    if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
+static void ui_list(int fd, const char *pin, struct in_addr peer) {
+  int status = check_pin(pin);
+  if (status == 200) status = create_download_session(peer, NULL);
+  if (status != 200) { reply(fd, status, NULL); return; }
+  static char body[65536];
+  if (download_metadata(body, sizeof(body)) < 0) { reply(fd, 500, NULL); return; }
+  size_t used = strlen(body);
+  if (!used || body[used-1] != '}') { reply(fd, 500, NULL); return; }
+  --used;
+  int n = snprintf(body + used, sizeof(body) - used, ",\"peers\":[");
+  if (n < 0 || (size_t)n >= sizeof(body) - used) { reply(fd, 500, NULL); return; }
+  used += (size_t)n;
+  int listed = 0;
+  for (int i = 0; i < MAX_PEERS; ++i) {
+    discovered_peer *p = &peers[i];
+    if (!p->fingerprint[0] || time(NULL) - p->seen > 120) continue;
+    char name[384], id[512], ip[INET_ADDRSTRLEN];
+    if (json_escape(p->alias, name, sizeof(name)) < 0 ||
+        json_escape(p->fingerprint, id, sizeof(id)) < 0 ||
+        !inet_ntop(AF_INET, &p->address, ip, sizeof(ip))) continue;
+    n = snprintf(body + used, sizeof(body) - used,
+      "%s{\"id\":\"%s\",\"alias\":\"%s\",\"address\":\"%s\",\"port\":%u,\"secure\":%s}",
+      listed++ ? "," : "", id, name, ip, p->port, p->secure ? "true" : "false");
+    if (n < 0 || (size_t)n >= sizeof(body) - used) { reply(fd, 500, NULL); return; }
     used += (size_t)n;
   }
-  n = snprintf(page + used, sizeof(page) - used, "</ul>%s", LEGAL_NOTICE);
-  if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
-  reply_type(fd, 200, "text/html; charset=utf-8", page);
-#undef LEGAL_NOTICE
+  if (used + 3 > sizeof(body)) { reply(fd, 500, NULL); return; }
+  memcpy(body + used, "]}", 3);
+  reply(fd, 200, body);
 }
 
 static void serve_download(int fd, const char *query, struct in_addr peer) {
@@ -692,6 +710,21 @@ static void browser_send(int fd, const char *query, struct in_addr peer,
                     "<!doctype html><h1>File sent</h1>");
 }
 
+static int read_form(int fd, const char *headers, const char *initial,
+                     size_t initial_len, char *form, size_t cap) {
+  uint64_t length;
+  if (parse_content_length(headers, &length) < 0 || length >= cap) return -1;
+  size_t have = initial_len > length ? (size_t)length : initial_len;
+  memcpy(form, initial, have);
+  while (have < length) {
+    ssize_t n = recv(fd, form + have, (size_t)length - have, 0);
+    if (n <= 0) return -1;
+    have += (size_t)n;
+  }
+  form[have] = 0;
+  return 0;
+}
+
 static void handle_http(int fd, struct in_addr peer) {
   struct timeval timeout = {.tv_sec = 15};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -719,7 +752,44 @@ static void handle_http(int fd, struct in_addr peer) {
   char *query = strchr(target, '?');
   if (query) *query++ = 0;
   if (!strcmp(method, "GET") && !strcmp(target, "/")) {
-    browser_page(fd, query, peer);
+    reply_type(fd, 200, "text/html; charset=utf-8", webui_html);
+    return;
+  }
+  if (!strcmp(method, "GET") && !strcmp(target, "/api/ui/status")) {
+    char name[384], body[512];
+    if (json_escape(alias_name, name, sizeof(name)) < 0) { reply(fd, 500, NULL); return; }
+    snprintf(body, sizeof(body), "{\"alias\":\"%s\",\"pinSet\":%s,\"setupLocalOnly\":true}",
+             name, pin_configured ? "true" : "false");
+    reply(fd, 200, body);
+    return;
+  }
+  if (!strcmp(method, "POST") && !strcmp(target, "/api/ui/pin")) {
+    if (pin_configured) { reply(fd, 409, NULL); return; }
+    if ((ntohl(peer.s_addr) & 0xff000000u) != 0x7f000000u) { reply(fd, 403, NULL); return; }
+    if (!header_is(header, "X-PS5-LocalSend", "1")) { reply(fd, 403, NULL); return; }
+    char form[64], value[16];
+    if (read_form(fd, header, header + header_len, used - header_len,
+                  form, sizeof(form)) < 0 ||
+        query_value(form, "pin", value, sizeof(value)) < 0 ||
+        strlen(value) != 6 || strspn(value, "0123456789") != 6) {
+      reply(fd, 400, NULL); return;
+    }
+    if (save_pin(value) < 0) { reply(fd, 500, NULL); return; }
+    reply(fd, 200, "{\"pinSet\":true}");
+    return;
+  }
+  if (!strcmp(method, "POST") && !strcmp(target, "/api/ui/list")) {
+    char form[64];
+    if (read_form(fd, header, header + header_len, used - header_len,
+                  form, sizeof(form)) < 0) { reply(fd, 400, NULL); return; }
+    ui_list(fd, form, peer);
+    return;
+  }
+  if (!pin_configured &&
+      ((!strncmp(target, "/api/localsend/v2/", 18) &&
+        strcmp(target, "/api/localsend/v2/info") &&
+        strcmp(target, "/api/localsend/v2/register")) || !strcmp(target, "/send"))) {
+    reply(fd, 403, "{\"error\":\"Set a PIN from the PS5 Media tile before transferring files\"}");
     return;
   }
   if (!strcmp(method, "POST") && !strcmp(target, "/api/localsend/v2/prepare-download")) {
@@ -834,12 +904,29 @@ int main(int argc, char **argv) {
     port = (unsigned)n;
   }
   random_hex(fingerprint, 16);
+  if (mkdir(output_dir, 0700) < 0 && errno != EEXIST) {
+    perror("LocalSend output directory"); return 1;
+  }
+  v = getenv("LOCALSEND_PIN");
+  if (v && *v) {
+    if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
+      fprintf(stderr, "LOCALSEND_PIN must be six digits\n"); return 1;
+    }
+    strcpy(download_pin, v);
+    pin_configured = 1;
+  } else if (load_pin() < 0) {
+    fprintf(stderr, "Could not read LocalSend PIN file\n"); return 1;
+  }
   if (argc > 1) {
     if (argc < 4 || argc > 6) {
       fprintf(stderr, "Usage: %s --send FILE PEER_IPV4 [PORT] [--https]\n", argv[0]);
       return 1;
     }
     if (strcmp(argv[1], "--send")) return 1;
+    if (!pin_configured) {
+      fprintf(stderr, "Set a LocalSend PIN from the PS5 Media tile before sending\n");
+      return 1;
+    }
     unsigned remote_port = DEFAULT_PORT;
     int secure = (argc >= 5 && !strcmp(argv[argc-1], "--https"));
     if (argc == 6 && !secure) return 1;
@@ -849,18 +936,6 @@ int main(int argc, char **argv) {
       remote_port = (unsigned)n;
     }
     return send_file_to_peer(argv[2], argv[3], remote_port, alias_name, fingerprint, port, secure);
-  }
-  v = getenv("LOCALSEND_PIN");
-  if (v && *v) {
-    if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
-      fprintf(stderr, "LOCALSEND_PIN must be six digits\n"); return 1;
-    }
-    strcpy(download_pin, v);
-  } else {
-    snprintf(download_pin, sizeof(download_pin), "%06u", (unsigned)arc4random_uniform(1000000));
-  }
-  if (mkdir(output_dir, 0700) < 0 && errno != EEXIST) {
-    perror("LocalSend output directory"); return 1;
   }
   int tcp = socket(AF_INET, SOCK_STREAM, 0);
   int udp = socket(AF_INET, SOCK_DGRAM, 0);
@@ -890,10 +965,11 @@ int main(int argc, char **argv) {
   struct sockaddr_in multicast = {.sin_family=AF_INET, .sin_port=htons((uint16_t)discovery_port)};
   inet_pton(AF_INET, GROUP, &multicast.sin_addr);
   printf("PS5 LocalSend listening on port %u, saving to %s\n", port, output_dir);
-  printf("PS5 LocalSend download PIN: %s\n", download_pin);
+  printf("PS5 LocalSend PIN: %s\n", pin_configured ? "configured" : "setup required in Media tile");
 #ifndef HOST_BUILD
   notify_request notice = {0};
-  snprintf(notice.message, sizeof(notice.message), "PS5 LocalSend download PIN: %s", download_pin);
+  snprintf(notice.message, sizeof(notice.message), "%s",
+           pin_configured ? "PS5 LocalSend ready" : "Open LocalSend in Media to set a PIN");
   sceKernelSendNotificationRequest(0, &notice, sizeof(notice), 0);
   if (launcher_install_if_needed(port) < 0)
     fprintf(stderr, "LocalSend Media launcher installation failed\n");

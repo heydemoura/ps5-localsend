@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LocalSend · PS5</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8eef5; background: #101722; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #101722; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid #68d2c8; outline-offset: 2px; }
+    .shell { width: min(1180px, calc(100% - 48px)); margin: auto; }
+    .topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #2b3543; }
+    .brand { display: flex; align-items: center; gap: 11px; font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
+    .brand small { color: #98aabd; font-size: 13px; font-weight: 500; letter-spacing: 0; }
+    .mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: #193b44; color: #8ce3d8; }
+    .mark svg { width: 20px; height: 20px; }
+    .pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #31554e; border-radius: 8px; background: #173229; color: #b7e6d4; font-size: 12px; white-space: nowrap; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #77d5a5; }
+    main { padding: 34px 0 50px; }
+    .page-head { margin-bottom: 24px; }
+    h1 { margin: 0 0 7px; font-size: 32px; font-weight: 700; letter-spacing: -.04em; }
+    .page-head p { margin: 0; color: #9eb0c2; font-size: 14px; line-height: 1.5; }
+    .overview { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 22px; border: 1px solid #2c3847; border-radius: 13px; background: #17212e; }
+    .overview-item { min-width: 0; padding: 16px 20px; border-right: 1px solid #2c3847; }
+    .overview-item:last-child { border: 0; }
+    .overview-label { display: block; margin-bottom: 6px; color: #91a5ba; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .overview-value { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 650; }
+    .overview-sub { display: block; margin-top: 3px; color: #9bb0c2; font-size: 12px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 18px; align-items: start; }
+    .panel { min-width: 0; overflow: hidden; border: 1px solid #2c3847; border-radius: 13px; background: #17212e; }
+    .panel-head { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 20px; border-bottom: 1px solid #2c3847; }
+    .panel h2 { margin: 0; font-size: 16px; font-weight: 700; }
+    .panel-head small { color: #9eafc0; white-space: nowrap; }
+    .section-note { margin: 5px 0 0; color: #9eb0c2; font-size: 12px; line-height: 1.4; }
+    .panel-body, .setup { padding: 22px 20px; }
+    .setup { max-width: 600px; }
+    .setup h3 { margin: 0 0 8px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
+    .setup p { max-width: 520px; margin: 0 0 22px; color: #a9bbcd; font-size: 14px; line-height: 1.55; }
+    label { display: block; margin-bottom: 7px; color: #c3d0dc; font-size: 12px; font-weight: 650; }
+    input, select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid #405166; border-radius: 8px; outline: none; background: #111a26; color: #eef4fa; }
+    input::placeholder { color: #7e91a6; }
+    input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }
+    .field { margin-bottom: 16px; }
+    .hint { display: block; margin-top: 6px; color: #91a5ba; font-size: 12px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 0 15px; border: 1px solid #69cfc2; border-radius: 8px; background: #64cbbb; color: #092322; font-weight: 700; }
+    .button:hover { background: #83ddd0; }
+    .button:disabled { opacity: .55; cursor: wait; }
+    .button.secondary { border-color: #425367; background: #233142; color: #e5eff8; }
+    .button.secondary:hover { background: #2c3d51; }
+    .button.small { min-height: 34px; padding: 0 11px; font-size: 12px; }
+    .head-actions { display: flex; align-items: center; gap: 10px; }
+    .alert { display: none; margin-bottom: 15px; padding: 11px 12px; border: 1px solid #a56857; border-radius: 8px; background: #422c2d; color: #ffd2c5; font-size: 13px; }
+    .alert.visible { display: block; }
+    .alert.success { border-color: #3c7669; background: #1d3937; color: #c6f1e2; }
+    .files { display: grid; gap: 0; }
+    .file { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid #2c3847; }
+    .file:first-child { padding-top: 0; }
+    .file:last-child { padding-bottom: 0; border: 0; }
+    .file-icon { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: 8px; background: #243d45; color: #87d9d0; }
+    .file-main { min-width: 0; flex: 1; }
+    .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+    .file-meta { margin-top: 3px; color: #94a7bb; font-size: 12px; }
+    .empty { padding: 46px 15px; text-align: center; color: #9fb1c4; font-size: 13px; line-height: 1.5; }
+    .empty strong { display: block; margin-bottom: 4px; color: #e8eef5; font-size: 15px; }
+    .side-stack { display: grid; gap: 18px; }
+    .caption, .notice { margin: 0; color: #aabccc; font-size: 12px; line-height: 1.55; }
+    .notice { padding: 12px; border: 1px solid #355259; border-radius: 8px; background: #1a3038; }
+    .selectrow { display: flex; gap: 10px; }
+    .selectrow .field { min-width: 0; flex: 1; }
+    footer { padding: 20px 0 30px; border-top: 1px solid #2b3543; color: #8ea2b5; font-size: 12px; line-height: 1.5; }
+    footer a { text-decoration: underline; text-underline-offset: 3px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+    @media (max-width: 560px) { .shell { width: min(100% - 28px, 1180px); } .topbar { height: 62px; } .brand small { display: none; } .overview { grid-template-columns: 1fr 1fr; } .overview-item:nth-child(2) { border-right: 0; } .overview-item:last-child { grid-column: span 2; border-top: 1px solid #2c3847; } .panel-head, .panel-body, .setup { padding-left: 15px; padding-right: 15px; } .file { flex-wrap: wrap; } .file .button { margin-left: 48px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m-4-4 4 4 4-4M4 17v3h16v-3"/></svg></span>LocalSend <small>PlayStation 5</small></div>
+      <div class="pill"><span class="dot"></span><span id="topStatus">Connecting</span></div>
+    </header>
+    <main>
+      <div class="page-head"><h1>Files</h1><p>Receive, download, and send files on your local network.</p></div>
+      <div class="overview">
+        <div class="overview-item"><span class="overview-label">This device</span><strong class="overview-value" id="deviceName">PlayStation 5</strong><span class="overview-sub" id="deviceStatus">Connecting to LocalSend…</span></div>
+        <div class="overview-item"><span class="overview-label">Transfer access</span><strong class="overview-value" id="accessStatus">Waiting for setup</strong><span class="overview-sub">PIN required for file access</span></div>
+        <div class="overview-item"><span class="overview-label">Nearby devices</span><strong class="overview-value" id="peerCount">—</strong><span class="overview-sub">Discovered on this network</span></div>
+      </div>
+      <div class="layout">
+        <section class="panel"><div class="panel-head"><div><h2>Files on this PS5</h2><p class="section-note" id="fileSubtitle">Set a PIN to start sharing.</p></div><div class="head-actions"><button id="refreshButton" class="button secondary small" type="button" hidden>Refresh</button><small id="fileCount">—</small></div></div>
+          <div id="setupPane" class="setup" hidden><h3>Set a PIN to enable transfers</h3><p>Choose a six-digit PIN before files can be sent or downloaded. Use it to unlock this page and authorize downloads from LocalSend apps.</p><div id="setupRemote" class="notice" hidden>Open the LocalSend shortcut in the PS5 Media tab to set the PIN. Setup is available only on the console.</div><form id="setupForm" hidden><div class="field"><label for="newPin">Six-digit PIN</label><input id="newPin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="new-password" required placeholder="••••••"><span class="hint">Stored on the PS5. Choose a PIN you can remember.</span></div><div id="setupAlert" class="alert" role="alert"></div><button class="button" type="submit">Set PIN</button></form></div>
+          <div id="unlockPane" class="setup" hidden><h3>Enter PIN</h3><p>Enter your six-digit PIN to view files and send them to other devices.</p><form id="unlockForm"><div class="field"><label for="unlockPin">PIN</label><input id="unlockPin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="current-password" required placeholder="••••••"><span class="hint">This page uses local HTTP. Enter your PIN only on a trusted network.</span></div><div id="unlockAlert" class="alert" role="alert"></div><button class="button" type="submit">Unlock files</button></form></div>
+          <div id="filesPane" class="panel-body" hidden><div id="actionAlert" class="alert" role="status"></div><div id="files" class="files"></div></div>
+        </section>
+        <aside class="side-stack"><section class="panel"><div class="panel-head"><h2>Send a file</h2></div><div class="panel-body"><p class="caption" id="sendHint">Unlock files to choose a destination.</p><div class="field" style="margin-top:20px"><label for="target">Destination</label><select id="target"><option value="">Manual address</option></select></div><div id="manual"><div class="field"><label for="peer">IPv4 address</label><input id="peer" inputmode="decimal" placeholder="192.168.0.50"></div><div class="selectrow"><div class="field"><label for="port">Port</label><input id="port" type="number" min="1" max="65535" value="53317"></div><div class="field"><label for="secure">Connection</label><select id="secure"><option value="0">HTTP</option><option value="1">HTTPS</option></select></div></div></div><div class="notice">Select a file from the list to send it. Both devices must be on the same local network.</div></div></section></aside>
+      </div>
+    </main>
+    <footer>Copyright © 2026 heydemoura · GPL-3.0-only; no warranty · <a href="https://github.com/heydemoura/ps5-localsend/blob/main/LICENSE" target="_blank" rel="noopener">License and source</a></footer>
+  </div>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    let snapshot = null;
+    let activePin = '';
+    const local = ['127.0.0.1', 'localhost'].includes(location.hostname);
+    function show(id, visible) { $(id).hidden = !visible; }
+    function alertBox(id, message, success=false) { const el=$(id); el.textContent=message; el.className='alert'+(message?' visible':'')+(success?' success':''); }
+    function size(bytes) { if(bytes<1024)return bytes+' B'; const units=['KB','MB','GB','TB']; let n=bytes; let i=-1; do{n/=1024;i++}while(n>=1024&&i<3); return n.toFixed(n<10?1:0)+' '+units[i]; }
+    async function api(path, data) { const options=data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-PS5-LocalSend':'1'},body:new URLSearchParams(data)}; const response=await fetch(path,options); if(!response.ok)throw new Error(response.status===401?'Incorrect PIN. Please try again.':response.status===429?'Too many attempts. Wait a minute and try again.':response.status===403?'Access denied. Complete PIN setup on the PS5 first.':`Request failed (${response.status}).`); return response.json(); }
+    function setState(state) { show('setupPane',state==='setup'); show('unlockPane',state==='unlock'); show('filesPane',state==='files'); show('refreshButton',state==='files'); for(const id of ['target','peer','port','secure'])$(id).disabled=state!=='files'; $('sendHint').textContent=state==='files'?'Choose a file on the left, then select a discovered device or enter an address.':'Unlock files to choose a destination.'; $('topStatus').textContent=state==='setup'?'Setup required':state==='unlock'?'Transfers enabled':'Files unlocked'; $('deviceStatus').textContent=state==='setup'?'PIN setup required before transfers':state==='unlock'?'Connected · Files locked':'Connected · Files unlocked'; $('accessStatus').textContent=state==='setup'?'Disabled':state==='unlock'?'Locked':'Unlocked'; $('fileSubtitle').textContent=state==='setup'?'Set a PIN to enable transfers.':state==='unlock'?'Enter your PIN to see files.':'Download or send a file to a nearby device.'; if(state!=='files')$('fileCount').textContent='—'; }
+    function render(data) { snapshot=data; const files=Object.values(data.files||{}); $('fileCount').textContent=files.length+' '+(files.length===1?'file':'files'); $('peerCount').textContent=(data.peers||[]).length; const list=$('files'); list.replaceChildren(); if(!files.length){const empty=document.createElement('div'); empty.className='empty'; empty.innerHTML='<strong>No files yet</strong>Files received by this PS5 will appear here. Use Refresh after sending a file from another device.'; list.append(empty);} for(const file of files){const row=document.createElement('div'); row.className='file'; const icon=document.createElement('span');icon.className='file-icon';icon.textContent='▣'; const main=document.createElement('div');main.className='file-main'; const name=document.createElement('div');name.className='file-name';name.textContent=file.fileName;name.title=file.fileName; const meta=document.createElement('div');meta.className='file-meta';meta.textContent=size(file.size);main.append(name,meta);const download=document.createElement('a');download.className='button secondary small';download.textContent='Download';download.href='/api/localsend/v2/download?'+new URLSearchParams({sessionId:data.sessionId,fileId:file.id});download.setAttribute('download',file.fileName); const send=document.createElement('button');send.className='button small';send.textContent='Send';send.addEventListener('click',()=>sendFile(file,send));row.append(icon,main,download,send);list.append(row);} const target=$('target');target.replaceChildren(new Option('Manual address','')); for(const peer of data.peers||[]){target.add(new Option(peer.alias+' · '+peer.address,peer.id));} show('manual',!target.value); }
+    async function unlock(pin){try{const data=await api('/api/ui/list',{pin});activePin=pin;alertBox('unlockAlert','');setState('files');render(data);}catch(error){alertBox('unlockAlert',error.message);}}
+    async function sendFile(file,button){if(!snapshot)return;const target=$('target').value;const peer=$('peer').value.trim();const port=$('port').value; if(!target&&(!/^\d{1,3}(\.\d{1,3}){3}$/.test(peer)||!port)){alertBox('actionAlert','Enter a valid destination address and port.');return;} button.disabled=true;button.textContent='Sending…';alertBox('actionAlert','');try{const response=await fetch('/send?'+new URLSearchParams({sessionId:snapshot.sessionId,fileId:file.id}),{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-PS5-LocalSend':'1'},body:new URLSearchParams({target,peer,port,secure:$('secure').value})});if(!response.ok)throw new Error('Send failed. Check the destination and try again.');alertBox('actionAlert','Sent '+file.fileName+' successfully.',true);}catch(error){alertBox('actionAlert',error.message);}finally{button.disabled=false;button.textContent='Send';}}
+    $('target').addEventListener('change',()=>show('manual',!$('target').value));
+    $('refreshButton').addEventListener('click',async()=>{try{render(await api('/api/ui/list',{pin:activePin}));alertBox('actionAlert','Files and nearby devices updated.',true);}catch(error){alertBox('actionAlert',error.message);}});
+    $('setupForm').addEventListener('submit',async event=>{event.preventDefault();const pin=$('newPin').value;try{await api('/api/ui/pin',{pin});$('newPin').value='';setState('unlock');$('unlockPin').value=pin;await unlock(pin);}catch(error){alertBox('setupAlert',error.message);}});
+    $('unlockForm').addEventListener('submit',async event=>{event.preventDefault();await unlock($('unlockPin').value);$('unlockPin').value='';});
+    (async()=>{try{const status=await api('/api/ui/status');$('deviceName').textContent=status.alias;show('setupForm',!status.pinSet&&local);show('setupRemote',!status.pinSet&&!local);setState(status.pinSet?'unlock':'setup');}catch(error){$('topStatus').textContent='Connection error';$('deviceStatus').textContent=error.message;}})();
+  </script>
+</body>
+</html>

@@ -20,7 +20,10 @@ CFLAGS += -std=c11 -O2 -Wall -Wextra -Werror -D_DEFAULT_SOURCE -Isrc
 .PHONY: all clean test
 all: $(TARGET)
 
-$(TARGET): $(SOURCES) assets/icon0.png
+src/webui.inc: assets/webui.html tools/embed_webui.py
+	python3 tools/embed_webui.py
+
+$(TARGET): $(SOURCES) src/webui.inc assets/icon0.png
 	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(LDADD)
 
 clean:

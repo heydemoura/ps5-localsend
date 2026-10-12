@@ -21,4 +21,4 @@ The project builds with [`ps5-payload-dev/sdk` v0.44](https://github.com/ps5-pay
 
 The [LocalSend protocol](https://github.com/localsend/protocol) and the [LocalSend app](https://github.com/localsend/localsend) were used as interoperability references. The LocalSend app is licensed under [Apache-2.0](https://github.com/localsend/localsend/blob/main/LICENSE). This repository does not include code or assets from that app.
 
-The `assets/icon0.svg` source and its generated `assets/icon0.png` are original project assets and are licensed under GPL-3.0-only with the rest of this project.
+The `assets/icon0.svg` source, its generated `assets/icon0.png`, and the `assets/webui.html` dashboard are original project assets and are licensed under GPL-3.0-only with the rest of this project. The dashboard does not incorporate code or artwork from the separate LocalSend web app.

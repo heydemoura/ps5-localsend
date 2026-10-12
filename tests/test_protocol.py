@@ -47,9 +47,9 @@ class ProtocolTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     @classmethod
-    def request(cls, method, path, body=None):
+    def request(cls, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", cls.port, timeout=20)
-        conn.request(method, path, body=body)
+        conn.request(method, path, body=body, headers=headers or {})
         response = conn.getresponse()
         result = response.status, response.read()
         conn.close()
@@ -127,6 +127,7 @@ class ProtocolTest(unittest.TestCase):
         source.write_bytes(b"from PS5 to peer" * 100)
         result = subprocess.run(
             [str(ROOT / "ps5-localsend.elf"), "--send", str(source), "127.0.0.1", str(self.port)],
+            env={**os.environ, "LOCALSEND_DIR": self.tmp.name, "LOCALSEND_PIN": "123456"},
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -170,7 +171,7 @@ class ProtocolTest(unittest.TestCase):
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.sendto(announcement, ("127.0.0.1", self.port))
                 for _ in range(50):
-                    _, page = self.request("GET", "/?pin=123456")
+                    _, page = self.request("POST", "/api/ui/list", b"pin=123456")
                     if b"Peer B" in page:
                         break
                     time.sleep(0.01)
@@ -208,10 +209,83 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(payload), metadata["size"])
         self.assertEqual(payload, (pathlib.Path(self.tmp.name) / metadata["fileName"]).read_bytes())
-        status, page = self.request("GET", "/?pin=123456")
+        status, page = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Files available for download", page)
+        self.assertIn(b"Set a PIN to enable transfers", page)
         self.assertIn(b"GPL-3.0-only; no warranty", page)
+        status, listing = self.request("POST", "/api/ui/list", b"pin=123456")
+        self.assertEqual(status, 200)
+        self.assertIn(b"files", listing)
+
+    def test_first_run_pin_setup_blocks_transfers_and_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            env = os.environ.copy()
+            env.pop("LOCALSEND_PIN", None)
+            env.update(LOCALSEND_DIR=directory, LOCALSEND_PORT=str(port))
+
+            def request(method, path, body=None, headers=None):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request(method, path, body=body, headers=headers or {})
+                response = conn.getresponse()
+                result = response.status, response.read()
+                conn.close()
+                return result
+
+            def start():
+                process = subprocess.Popen([str(ROOT / "ps5-localsend.elf")], env=env,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                for _ in range(100):
+                    try:
+                        if request("GET", "/api/ui/status")[0] == 200:
+                            return process
+                    except OSError:
+                        time.sleep(0.05)
+                self.fail("first-run server did not start")
+
+            process = start()
+            try:
+                self.assertFalse(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
+                self.assertFalse(json.loads(request("GET", "/api/localsend/v2/info")[1])["download"])
+                self.assertEqual(request("GET", "/")[0], 200)
+                outbound = subprocess.run(
+                    [str(ROOT / "ps5-localsend.elf"), "--send", "missing.txt", "127.0.0.1"],
+                    env=env, capture_output=True, text=True, timeout=5,
+                )
+                self.assertNotEqual(outbound.returncode, 0)
+                self.assertIn("Set a LocalSend PIN", outbound.stderr)
+                for method, path, body in [
+                    ("POST", "/api/localsend/v2/prepare-upload", b"{}"),
+                    ("POST", "/api/localsend/v2/upload", b""),
+                    ("POST", "/api/localsend/v2/prepare-download?pin=123456", b""),
+                    ("GET", "/api/localsend/v2/download", None),
+                    ("POST", "/send", b""),
+                ]:
+                    self.assertEqual(request(method, path, body)[0], 403)
+                self.assertEqual(request("POST", "/api/ui/pin", b"pin=123456")[0], 403)
+                headers = {"x-ps5-localsend": "1"}
+                self.assertEqual(request("POST", "/api/ui/pin", b"pin=12345", headers)[0], 400)
+                self.assertEqual(request("POST", "/api/ui/pin", b"pin=123456", headers)[0], 200)
+                self.assertTrue(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
+                self.assertEqual(request("POST", "/api/ui/pin", b"pin=111111", headers)[0], 409)
+                pin_file = pathlib.Path(directory) / ".pin"
+                self.assertEqual(pin_file.read_text(), "123456")
+                self.assertEqual(pin_file.stat().st_mode & 0o777, 0o600)
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+            process = start()
+            try:
+                self.assertTrue(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
+                self.assertEqual(request("POST", "/api/ui/list", b"pin=123456")[0], 200)
+                self.assertEqual(request("POST", "/api/ui/list", b"pin=654321")[0], 401)
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
 
     def test_wrong_token_rejected(self):
         path = self.prepare("secret.bin", b"abc")
