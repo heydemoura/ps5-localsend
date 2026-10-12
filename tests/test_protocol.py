@@ -277,18 +277,60 @@ class ProtocolTest(unittest.TestCase):
                 self.assertEqual(request("POST", "/api/ui/pin", b"pin=123456", headers)[0], 200)
                 self.assertTrue(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
                 self.assertEqual(request("POST", "/api/ui/pin", b"pin=111111", headers)[0], 409)
-                pin_file = pathlib.Path(directory) / ".pin"
-                self.assertEqual(pin_file.read_text(), "123456")
+                pin_file = pathlib.Path(directory) / "config"
+                config = dict(line.split("=", 1) for line in pin_file.read_text().splitlines())
+                self.assertEqual(config["version"], "1")
+                self.assertEqual(config["kdf"], "pbkdf2-sha256")
+                self.assertEqual(bytes.fromhex(config["hash"]), hashlib.pbkdf2_hmac(
+                    "sha256", b"123456", bytes.fromhex(config["salt"]), int(config["iterations"])))
+                self.assertNotIn("123456", pin_file.read_text())
                 self.assertEqual(pin_file.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(pathlib.Path(directory).stat().st_mode & 0o777, 0o700)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
                 process.stderr.close()
+            (pathlib.Path(directory) / ".pin").write_text("123456")
             process = start()
             try:
                 self.assertTrue(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
-                self.assertEqual(request("POST", "/api/ui/list", b"pin=123456")[0], 200)
+                self.assertFalse((pathlib.Path(directory) / ".pin").exists())
+                status, listing = request("POST", "/api/ui/list", b"pin=123456")
+                self.assertEqual(status, 200)
+                self.assertNotIn("config", [item["fileName"] for item in json.loads(listing)["files"].values()])
                 self.assertEqual(request("POST", "/api/ui/list", b"pin=654321")[0], 401)
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+
+    def test_legacy_pin_migrates_to_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (pathlib.Path(directory) / ".pin").write_text("789012")
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            env = {**os.environ, "LOCALSEND_DIR": directory, "LOCALSEND_PORT": str(port)}
+            env.pop("LOCALSEND_PIN", None)
+            process = subprocess.Popen([str(ROOT / "ps5-localsend.elf")], env=env,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                for _ in range(100):
+                    try:
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                        conn.request("POST", "/api/ui/list", b"pin=789012")
+                        response = conn.getresponse()
+                        status = response.status
+                        response.read()
+                        conn.close()
+                        if status == 200:
+                            break
+                    except OSError:
+                        time.sleep(0.05)
+                else:
+                    self.fail("migrated PIN did not authenticate")
+                self.assertTrue((pathlib.Path(directory) / "config").is_file())
+                self.assertFalse((pathlib.Path(directory) / ".pin").exists())
             finally:
                 process.terminate()
                 process.wait(timeout=5)

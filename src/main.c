@@ -38,6 +38,7 @@
 #define MAX_METADATA 65536
 #define HEADER_CAP 16384
 #define CHUNK 16384
+#define PIN_KDF_ITERATIONS 100000
 
 typedef struct {
   char id[128];
@@ -76,7 +77,8 @@ static transfer_session session;
 static download_session downloads;
 static discovered_peer peers[MAX_PEERS];
 static char fingerprint[33];
-static char download_pin[7];
+static unsigned char pin_salt[16];
+static unsigned char pin_hash[32];
 static int pin_configured;
 static int pin_failures;
 static time_t pin_window;
@@ -130,6 +132,30 @@ static void random_hex(char *out, size_t bytes) {
     out[2*i+1] = hex[buf[i] & 15];
   }
   out[2*bytes] = 0;
+}
+
+static void pin_derive(const char *pin, const unsigned char salt[16], unsigned char out[32]) {
+  unsigned char pad[64] = {0}, digest[32], block[20];
+  sha256_ctx inner_base, outer_base;
+  memcpy(pad, pin, 6);
+  for (size_t i = 0; i < sizeof(pad); ++i) pad[i] ^= 0x36;
+  sha256_init(&inner_base);
+  sha256_update(&inner_base, pad, sizeof(pad));
+  for (size_t i = 0; i < sizeof(pad); ++i) pad[i] ^= 0x36 ^ 0x5c;
+  sha256_init(&outer_base);
+  sha256_update(&outer_base, pad, sizeof(pad));
+  memcpy(block, salt, 16);
+  block[16] = block[17] = block[18] = 0;
+  block[19] = 1;
+  for (int iteration = 0; iteration < PIN_KDF_ITERATIONS; ++iteration) {
+    sha256_ctx inner = inner_base, outer = outer_base;
+    sha256_update(&inner, iteration ? digest : block, iteration ? sizeof(digest) : sizeof(block));
+    sha256_final(&inner, digest);
+    sha256_update(&outer, digest, sizeof(digest));
+    sha256_final(&outer, digest);
+    if (!iteration) memcpy(out, digest, sizeof(digest));
+    else for (size_t i = 0; i < sizeof(digest); ++i) out[i] ^= digest[i];
+  }
 }
 
 static int send_all(int fd, const void *buf, size_t len) {
@@ -494,45 +520,107 @@ static int check_pin(const char *query) {
   if (pin_failures >= 5) return 429;
   char entered[32];
   if (!query || query_value(query, "pin", entered, sizeof(entered)) < 0 ||
-      strcmp(entered, download_pin)) {
+      strlen(entered) != 6 || strspn(entered, "0123456789") != 6) {
     ++pin_failures;
     return 401;
   }
+  unsigned char candidate[32];
+  pin_derive(entered, pin_salt, candidate);
+  unsigned difference = 0;
+  for (size_t i = 0; i < sizeof(candidate); ++i) difference |= candidate[i] ^ pin_hash[i];
+  if (difference) { ++pin_failures; return 401; }
   pin_failures = 0;
   return 200;
 }
 
-static int pin_file_path(char *path, size_t cap) {
-  int n = snprintf(path, cap, "%s/.pin", output_dir);
+static int pin_file_path(char *path, size_t cap, const char *name) {
+  int n = snprintf(path, cap, "%s/%s", output_dir, name);
   return n < 0 || (size_t)n >= cap ? -1 : 0;
 }
 
-static int load_pin(void) {
-  char path[sizeof(output_dir) + 8];
-  if (pin_file_path(path, sizeof(path)) < 0) return -1;
-  int fd = open(path, O_RDONLY | O_NOFOLLOW);
-  if (fd < 0) return errno == ENOENT ? 0 : -1;
-  char value[8] = {0};
-  ssize_t n = read(fd, value, sizeof(value));
-  close(fd);
-  if (n != 6 || strspn(value, "0123456789") != 6) return -1;
-  memcpy(download_pin, value, 6);
-  download_pin[6] = 0;
-  pin_configured = 1;
+static int hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+static int decode_hex(const char *input, unsigned char *output, size_t length) {
+  for (size_t i = 0; i < length; ++i) {
+    int hi = hex_value(input[2*i]), lo = hex_value(input[2*i+1]);
+    if (hi < 0 || lo < 0) return -1;
+    output[i] = (unsigned char)((hi << 4) | lo);
+  }
   return 0;
 }
 
 static int save_pin(const char *value) {
-  char path[sizeof(output_dir) + 8];
-  if (pin_file_path(path, sizeof(path)) < 0) return -1;
+  char path[sizeof(output_dir) + 16], salt_hex[33], hash_hex[65], content[180];
+  unsigned char salt[16], hash[32];
+  if (pin_file_path(path, sizeof(path), "config") < 0) return -1;
+  random_hex(salt_hex, sizeof(salt));
+  if (decode_hex(salt_hex, salt, sizeof(salt)) < 0) return -1;
+  pin_derive(value, salt, hash);
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < sizeof(hash); ++i) {
+    hash_hex[2*i] = hex[hash[i] >> 4];
+    hash_hex[2*i+1] = hex[hash[i] & 15];
+  }
+  hash_hex[64] = 0;
+  int length = snprintf(content, sizeof(content),
+                        "version=1\nkdf=pbkdf2-sha256\niterations=%d\nsalt=%s\nhash=%s\n",
+                        PIN_KDF_ITERATIONS, salt_hex, hash_hex);
+  if (length < 0 || (size_t)length >= sizeof(content)) return -1;
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
   if (fd < 0) return -1;
-  int ok = write(fd, value, 6) == 6 && fsync(fd) == 0;
+  int ok = write(fd, content, (size_t)length) == length && fsync(fd) == 0;
   if (close(fd) != 0) ok = 0;
   if (!ok) { unlink(path); return -1; }
-  memcpy(download_pin, value, 6);
-  download_pin[6] = 0;
+  memcpy(pin_salt, salt, sizeof(salt));
+  memcpy(pin_hash, hash, sizeof(hash));
   pin_configured = 1;
+  return 0;
+}
+
+static int load_pin(void) {
+  char path[sizeof(output_dir) + 16];
+  if (pin_file_path(path, sizeof(path), "config") < 0) return -1;
+  int fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0 && errno != ENOENT) return -1;
+  if (fd >= 0) {
+    struct stat st;
+    char content[180], salt_hex[33] = {0}, hash_hex[65] = {0};
+    unsigned iterations = 0;
+    int consumed = 0;
+    ssize_t length = read(fd, content, sizeof(content) - 1);
+    int ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+             (st.st_mode & 077) == 0 && length > 0 && length < (ssize_t)sizeof(content) - 1;
+    if (close(fd) != 0) ok = 0;
+    if (!ok) return -1;
+    content[length] = 0;
+    if (sscanf(content, "version=1\nkdf=pbkdf2-sha256\niterations=%u\nsalt=%32[0-9a-f]\nhash=%64[0-9a-f]\n%n",
+               &iterations, salt_hex, hash_hex, &consumed) != 3 ||
+        consumed != length || iterations != PIN_KDF_ITERATIONS ||
+        strlen(salt_hex) != 32 || strlen(hash_hex) != 64 ||
+        decode_hex(salt_hex, pin_salt, sizeof(pin_salt)) < 0 ||
+        decode_hex(hash_hex, pin_hash, sizeof(pin_hash)) < 0) return -1;
+    pin_configured = 1;
+    /* Complete cleanup if a previous migration stopped after saving config. */
+    if (pin_file_path(path, sizeof(path), ".pin") < 0) return -1;
+    if (unlink(path) < 0 && errno != ENOENT) return -1;
+    return 0;
+  }
+  /* Migrate PINs saved by previous releases without changing the user's PIN. */
+  if (pin_file_path(path, sizeof(path), ".pin") < 0) return -1;
+  fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) return errno == ENOENT ? 0 : -1;
+  char legacy[8] = {0};
+  struct stat st;
+  ssize_t length = read(fd, legacy, sizeof(legacy));
+  int ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && length == 6 &&
+           strspn(legacy, "0123456789") == 6;
+  if (close(fd) != 0) ok = 0;
+  if (!ok || save_pin(legacy) < 0) return -1;
+  if (unlink(path) < 0) return -1;
   return 0;
 }
 
@@ -549,7 +637,7 @@ static int create_download_session(struct in_addr peer, const char *requested_id
   if (!dir) return 500;
   struct dirent *entry;
   while (downloads.count < MAX_FILES && (entry = readdir(dir))) {
-    if (entry->d_name[0] == '.') continue;
+    if (entry->d_name[0] == '.' || !strcmp(entry->d_name, "config")) continue;
     transfer_file *f = &downloads.files[downloads.count];
     size_t name_len = strlen(entry->d_name);
     if (name_len >= sizeof(f->name)) continue;
@@ -922,12 +1010,18 @@ int main(int argc, char **argv) {
   if (mkdir(output_dir, 0700) < 0 && errno != EEXIST) {
     perror("LocalSend output directory"); return 1;
   }
+  struct stat output_stat;
+  if (lstat(output_dir, &output_stat) < 0 || !S_ISDIR(output_stat.st_mode) ||
+      chmod(output_dir, 0700) < 0) {
+    fprintf(stderr, "LocalSend output directory must be a private directory\n"); return 1;
+  }
   v = getenv("LOCALSEND_PIN");
   if (v && *v) {
     if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
       fprintf(stderr, "LOCALSEND_PIN must be six digits\n"); return 1;
     }
-    strcpy(download_pin, v);
+    arc4random_buf(pin_salt, sizeof(pin_salt));
+    pin_derive(v, pin_salt, pin_hash);
     pin_configured = 1;
   } else if (load_pin() < 0) {
     fprintf(stderr, "Could not read LocalSend PIN file\n"); return 1;
