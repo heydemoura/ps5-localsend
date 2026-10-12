@@ -533,11 +533,14 @@ static int html_escape(const char *input, char *out, size_t cap) {
 }
 
 static void browser_page(int fd, const char *query, struct in_addr peer) {
+#define LEGAL_NOTICE "<footer><small>Copyright (C) 2026 heydemoura. " \
+  "GPL-3.0-only; no warranty. <a href='https://github.com/heydemoura/ps5-localsend/blob/main/LICENSE'>" \
+  "License and source</a>.</small></footer>"
   static const char form[] =
     "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>PS5 LocalSend</title><h1>PS5 LocalSend</h1>"
     "<form><label>PIN <input name=pin type=password inputmode=numeric pattern='[0-9]{6}' required>"
-    "</label><button>Show files</button></form>";
+    "</label><button>Show files</button></form>" LEGAL_NOTICE;
   if (!query) { reply_type(fd, 200, "text/html; charset=utf-8", form); return; }
   int code = check_pin(query);
   if (code != 200) { reply_type(fd, code, "text/html; charset=utf-8", form); return; }
@@ -582,9 +585,10 @@ static void browser_page(int fd, const char *query, struct in_addr peer) {
     if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
     used += (size_t)n;
   }
-  if (used + 6 > sizeof(page)) { reply(fd, 500, NULL); return; }
-  memcpy(page + used, "</ul>", 6);
+  n = snprintf(page + used, sizeof(page) - used, "</ul>%s", LEGAL_NOTICE);
+  if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
   reply_type(fd, 200, "text/html; charset=utf-8", page);
+#undef LEGAL_NOTICE
 }
 
 static void serve_download(int fd, const char *query, struct in_addr peer) {

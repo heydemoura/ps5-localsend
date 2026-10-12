@@ -211,6 +211,7 @@ class ProtocolTest(unittest.TestCase):
         status, page = self.request("GET", "/?pin=123456")
         self.assertEqual(status, 200)
         self.assertIn(b"Files available for download", page)
+        self.assertIn(b"GPL-3.0-only; no warranty", page)
 
     def test_wrong_token_rejected(self):
         path = self.prepare("secret.bin", b"abc")

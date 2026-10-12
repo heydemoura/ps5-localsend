@@ -62,4 +62,4 @@ jobs:
             printf '%s\n' 'PS5 payload SDK v0.44 source: https://github.com/ps5-payload-dev/sdk/archive/refs/tags/v0.44.tar.gz'
             printf '%s\n' 'See LICENSE, THIRD_PARTY_NOTICES.md, README.md, and RELEASING.md in the release source.'
           } > ps5-localsend.elf.SOURCE.txt
-          gh release upload "$RELEASE_TAG" ps5-localsend.elf ps5-localsend.elf.sha256 ps5-localsend.elf.SOURCE.txt --clobber
+          gh release upload "$RELEASE_TAG" ps5-localsend.elf ps5-localsend.elf.sha256 ps5-localsend.elf.SOURCE.txt LICENSE THIRD_PARTY_NOTICES.md --clobber
