@@ -332,10 +332,10 @@ static int check_pin(const char *query) {
   return 200;
 }
 
-static int create_download_session(struct in_addr peer) {
+static int create_download_session(struct in_addr peer, const char *requested_id) {
   if (downloads.count && time(NULL) < downloads.expires) {
-    if (downloads.peer.s_addr == peer.s_addr) return 200;
-    return 409;
+    if (downloads.peer.s_addr != peer.s_addr) return 409;
+    if (requested_id && !strcmp(downloads.id, requested_id)) return 200;
   }
   memset(&downloads, 0, sizeof(downloads));
   downloads.peer = peer;
@@ -409,7 +409,7 @@ static void browser_page(int fd, const char *query, struct in_addr peer) {
   if (!query) { reply_type(fd, 200, "text/html; charset=utf-8", form); return; }
   int code = check_pin(query);
   if (code != 200) { reply_type(fd, code, "text/html; charset=utf-8", form); return; }
-  code = create_download_session(peer);
+  code = create_download_session(peer, NULL);
   if (code != 200) { reply(fd, code, NULL); return; }
   char page[32768];
   size_t used = 0;
@@ -423,8 +423,13 @@ static void browser_page(int fd, const char *query, struct in_addr peer) {
     transfer_file *f = &downloads.files[i];
     if (html_escape(f->name, name, sizeof(name)) < 0) continue;
     n = snprintf(page + used, sizeof(page) - used,
-      "<li><a href='/api/localsend/v2/download?sessionId=%s&amp;fileId=%s'>%s</a> (%" PRIu64 " bytes)</li>",
-      downloads.id, f->id, name, f->size);
+      "<li><a href='/api/localsend/v2/download?sessionId=%s&amp;fileId=%s'>%s</a> (%" PRIu64 " bytes)"
+      "<form method=post action='/send?sessionId=%s&amp;fileId=%s'>"
+      "<label>Peer IPv4 <input name=peer required></label>"
+      "<label>Port <input name=port type=number min=1 max=65535 value=53317 required></label>"
+      "<label><input name=secure type=checkbox value=1> HTTPS</label>"
+      "<button>Send</button></form></li>",
+      downloads.id, f->id, name, f->size, downloads.id, f->id);
     if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
     used += (size_t)n;
   }
@@ -470,6 +475,54 @@ static void serve_download(int fd, const char *query, struct in_addr peer) {
   close(file);
 }
 
+static void browser_send(int fd, const char *query, struct in_addr peer,
+                         const char *initial, size_t initial_len, uint64_t length) {
+  char sid[64], id[64];
+  if (!query || query_value(query, "sessionId", sid, sizeof(sid)) < 0 ||
+      query_value(query, "fileId", id, sizeof(id)) < 0 || length > 1024) {
+    reply(fd, 400, NULL); return;
+  }
+  if (!downloads.count || time(NULL) > downloads.expires ||
+      peer.s_addr != downloads.peer.s_addr || strcmp(sid, downloads.id)) {
+    reply(fd, 403, NULL); return;
+  }
+  transfer_file *f = NULL;
+  for (int i = 0; i < downloads.count; ++i)
+    if (!strcmp(id, downloads.files[i].id)) f = &downloads.files[i];
+  if (!f) { reply(fd, 404, NULL); return; }
+  char form[1025];
+  size_t have = initial_len > length ? (size_t)length : initial_len;
+  memcpy(form, initial, have);
+  while (have < length) {
+    ssize_t n = recv(fd, form + have, (size_t)length - have, 0);
+    if (n <= 0) { reply(fd, 400, NULL); return; }
+    have += (size_t)n;
+  }
+  form[have] = 0;
+  char address[64], port_text[16], secure_text[8];
+  if (query_value(form, "peer", address, sizeof(address)) < 0 ||
+      query_value(form, "port", port_text, sizeof(port_text)) < 0) {
+    reply(fd, 400, NULL); return;
+  }
+  char *end;
+  unsigned long remote_port = strtoul(port_text, &end, 10);
+  if (*end || remote_port == 0 || remote_port > 65535) { reply(fd, 400, NULL); return; }
+  int secure = query_value(form, "secure", secure_text, sizeof(secure_text)) == 0 &&
+               !strcmp(secure_text, "1");
+  char path[1024];
+  if (snprintf(path, sizeof(path), "%s/%s", output_dir, f->name) >= (int)sizeof(path)) {
+    reply(fd, 500, NULL); return;
+  }
+  struct stat st;
+  if (lstat(path, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+      (uint64_t)st.st_size != f->size) { reply(fd, 409, NULL); return; }
+  int sent = send_file_to_peer(path, address, (unsigned)remote_port,
+                               alias_name, fingerprint, port, secure);
+  reply_type(fd, sent ? 500 : 200, "text/html; charset=utf-8",
+             sent ? "<!doctype html><h1>Send failed</h1><p>Check the loader log.</p>" :
+                    "<!doctype html><h1>File sent</h1>");
+}
+
 static void handle_http(int fd, struct in_addr peer) {
   struct timeval timeout = {.tv_sec = 15};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -502,7 +555,10 @@ static void handle_http(int fd, struct in_addr peer) {
   }
   if (!strcmp(method, "POST") && !strcmp(target, "/api/localsend/v2/prepare-download")) {
     int status = check_pin(query);
-    if (status == 200) status = create_download_session(peer);
+    char requested[64];
+    const char *requested_id = query && query_value(query, "sessionId", requested, sizeof(requested)) == 0
+      ? requested : NULL;
+    if (status == 200) status = create_download_session(peer, requested_id);
     if (status != 200) { reply(fd, status, NULL); return; }
     char body[32768];
     if (download_metadata(body, sizeof(body)) < 0) { reply(fd, 500, NULL); return; }
@@ -511,6 +567,12 @@ static void handle_http(int fd, struct in_addr peer) {
   }
   if (!strcmp(method, "GET") && !strcmp(target, "/api/localsend/v2/download")) {
     serve_download(fd, query, peer);
+    return;
+  }
+  if (!strcmp(method, "POST") && !strcmp(target, "/send")) {
+    uint64_t length;
+    if (parse_content_length(header, &length) < 0) { reply(fd, 400, NULL); return; }
+    browser_send(fd, query, peer, header + header_len, used - header_len, length);
     return;
   }
   if (!strcmp(method, "GET") && !strcmp(target, "/api/localsend/v2/info")) {

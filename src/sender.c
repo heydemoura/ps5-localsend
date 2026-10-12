@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #endif
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -118,13 +119,15 @@ int send_file_to_peer(const char *path, const char *address, unsigned port,
     fprintf(stderr,"LocalSend: peer must be an IPv4 address\n");
     return 1;
   }
+  int file_fd=open(path,O_RDONLY | O_NOFOLLOW);
   struct stat st;
-  if(stat(path,&st)<0 || !S_ISREG(st.st_mode) || st.st_size<0) {
+  if(file_fd<0 || fstat(file_fd,&st)<0 || !S_ISREG(st.st_mode) || st.st_size<0) {
     fprintf(stderr,"LocalSend: file is not readable or regular: %s\n",path);
+    if(file_fd>=0)close(file_fd);
     return 1;
   }
-  FILE *file=fopen(path,"rb");
-  if(!file){perror(path);return 1;}
+  FILE *file=fdopen(file_fd,"rb");
+  if(!file){perror(path);close(file_fd);return 1;}
   sha256_ctx hash; sha256_init(&hash);
   char chunk[16384]; size_t n;
   while((n=fread(chunk,1,sizeof(chunk),file))>0)sha256_update(&hash,chunk,n);

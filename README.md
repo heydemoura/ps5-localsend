@@ -8,7 +8,7 @@ A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https:/
 - HTTP `/prepare-upload`, `/upload`, and `/cancel` with per-file session tokens, size checks, SHA-256 verification, and filename sanitization.
 - Headless receiving into `/data/localsend`. Uploaded files get a random prefix to avoid replacing existing files.
 - Command-line sending to HTTP or HTTPS LocalSend peers with the standard prepare/upload flow. HTTPS uses the PS5's `libSceHttp` and has not yet been tested on hardware.
-- PIN-protected LocalSend `/prepare-download` and `/download` API, plus a simple browser page for retrieving files from the PS5.
+- PIN-protected LocalSend `/prepare-download` and `/download` API, plus a browser page for downloading PS5 files and sending them to another peer.
 
 HTTPS receiving, peer discovery for outbound sends, approval for incoming uploads, and an on-console user interface are not implemented yet. The payload advertises `protocol: http` and `download: true`; clients sending to it must support unencrypted LocalSend peers. HTTPS outbound mode accepts self-signed peer certificates without verifying a remembered fingerprint. Use only on a trusted LAN. This is an independent native protocol implementation rather than a build of LocalSend's Flutter interface.
 
@@ -26,7 +26,7 @@ The output is `ps5-localsend.elf`. To run host integration tests:
 make HOST=1 test
 ```
 
-Deploy the ELF using a supported PS5 ELF loader. The payload stays running, discovers LocalSend peers, and auto accepts uploads. A writable `/data` partition is required. The payload shows a six-digit download PIN in a PS5 notification and writes it to the loader log. Open `http://<PS5-IP>:53317/` in a browser and enter the PIN to download files from `/data/localsend`. LocalSend clients can use that PIN with `/prepare-download`.
+Deploy the ELF using a supported PS5 ELF loader. The payload stays running, discovers LocalSend peers, and auto accepts uploads. A writable `/data` partition is required. The payload shows a six-digit download PIN in a PS5 notification and writes it to the loader log. Open `http://<PS5-IP>:53317/` in a browser and enter the PIN to download files from `/data/localsend` or send one of those files to a peer by IPv4 address. LocalSend clients can use that PIN with `/prepare-download`.
 
 `LOCALSEND_DIR`, `LOCALSEND_PORT`, `LOCALSEND_ALIAS`, and `LOCALSEND_PIN` can override the defaults if provided by the loader. `LOCALSEND_PIN` must contain exactly six digits. This also makes local testing easier.
 
