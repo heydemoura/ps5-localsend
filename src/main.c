@@ -84,6 +84,7 @@ static int pin_failures;
 static time_t pin_window;
 static char alias_name[96];
 static char output_dir[512] = "/data/localsend";
+static char drop_dir[sizeof(output_dir) + 6];
 static unsigned port = DEFAULT_PORT;
 
 static void remember_peer(const json_doc *d, struct in_addr address) {
@@ -449,8 +450,8 @@ static int write_file(int fd, const char *initial, size_t initial_len, uint64_t 
   if (!chunked && length != f->size) return 400;
   char temp[1024], final[1024], suffix[17];
   random_hex(suffix, 8);
-  if (snprintf(temp, sizeof(temp), "%s/.%s.part", output_dir, suffix) >= (int)sizeof(temp) ||
-      snprintf(final, sizeof(final), "%s/%s-%s", output_dir, suffix, f->name) >= (int)sizeof(final)) return 500;
+  if (snprintf(temp, sizeof(temp), "%s/.%s.part", drop_dir, suffix) >= (int)sizeof(temp) ||
+      snprintf(final, sizeof(final), "%s/%s-%s", drop_dir, suffix, f->name) >= (int)sizeof(final)) return 500;
   int out = open(temp, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (out < 0) return 500;
   sha256_ctx hash;
@@ -624,6 +625,30 @@ static int load_pin(void) {
   return 0;
 }
 
+static int legacy_receive_name(const char *name) {
+  if (strlen(name) < 18 || name[16] != '-') return 0;
+  for (int i = 0; i < 16; ++i) if (hex_value(name[i]) < 0) return 0;
+  return 1;
+}
+
+static void migrate_received_files(void) {
+  DIR *dir = opendir(output_dir);
+  if (!dir) return;
+  struct dirent *entry;
+  while ((entry = readdir(dir))) {
+    if (!legacy_receive_name(entry->d_name)) continue;
+    char source[1024], destination[1024];
+    if (snprintf(source, sizeof(source), "%s/%s", output_dir, entry->d_name) >= (int)sizeof(source) ||
+        snprintf(destination, sizeof(destination), "%s/%s", drop_dir, entry->d_name) >= (int)sizeof(destination)) continue;
+    struct stat st;
+    if (lstat(source, &st) < 0 || !S_ISREG(st.st_mode)) continue;
+    if (lstat(destination, &st) == 0 || errno != ENOENT) continue;
+    if (rename(source, destination) < 0)
+      fprintf(stderr, "Could not move received file into drop: %s\n", entry->d_name);
+  }
+  closedir(dir);
+}
+
 static int create_download_session(struct in_addr peer, const char *requested_id) {
   if (downloads.count && time(NULL) < downloads.expires) {
     if (downloads.peer.s_addr != peer.s_addr) return 409;
@@ -633,16 +658,16 @@ static int create_download_session(struct in_addr peer, const char *requested_id
   downloads.peer = peer;
   downloads.expires = time(NULL) + 600;
   random_hex(downloads.id, 16);
-  DIR *dir = opendir(output_dir);
+  DIR *dir = opendir(drop_dir);
   if (!dir) return 500;
   struct dirent *entry;
   while (downloads.count < MAX_FILES && (entry = readdir(dir))) {
-    if (entry->d_name[0] == '.' || !strcmp(entry->d_name, "config")) continue;
+    if (entry->d_name[0] == '.') continue;
     transfer_file *f = &downloads.files[downloads.count];
     size_t name_len = strlen(entry->d_name);
     if (name_len >= sizeof(f->name)) continue;
     char path[1024];
-    if (snprintf(path, sizeof(path), "%s/%s", output_dir, entry->d_name) >= (int)sizeof(path)) continue;
+    if (snprintf(path, sizeof(path), "%s/%s", drop_dir, entry->d_name) >= (int)sizeof(path)) continue;
     struct stat st;
     if (lstat(path, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0) continue;
     memcpy(f->name, entry->d_name, name_len + 1);
@@ -721,7 +746,7 @@ static void serve_download(int fd, const char *query, struct in_addr peer) {
     if (!strcmp(id, downloads.files[i].id)) f = &downloads.files[i];
   if (!f) { reply(fd, 404, NULL); return; }
   char path[1024];
-  if (snprintf(path, sizeof(path), "%s/%s", output_dir, f->name) >= (int)sizeof(path)) {
+  if (snprintf(path, sizeof(path), "%s/%s", drop_dir, f->name) >= (int)sizeof(path)) {
     reply(fd, 500, NULL); return;
   }
   int file = open(path, O_RDONLY | O_NOFOLLOW);
@@ -796,7 +821,7 @@ static void browser_send(int fd, const char *query, struct in_addr peer,
              !strcmp(secure_text, "1");
   }
   char path[1024];
-  if (snprintf(path, sizeof(path), "%s/%s", output_dir, f->name) >= (int)sizeof(path)) {
+  if (snprintf(path, sizeof(path), "%s/%s", drop_dir, f->name) >= (int)sizeof(path)) {
     reply(fd, 500, NULL); return;
   }
   struct stat st;
@@ -1015,6 +1040,13 @@ int main(int argc, char **argv) {
       chmod(output_dir, 0700) < 0) {
     fprintf(stderr, "LocalSend output directory must be a private directory\n"); return 1;
   }
+  if (snprintf(drop_dir, sizeof(drop_dir), "%s/drop", output_dir) >= (int)sizeof(drop_dir) ||
+      (mkdir(drop_dir, 0700) < 0 && errno != EEXIST) ||
+      lstat(drop_dir, &output_stat) < 0 || !S_ISDIR(output_stat.st_mode) ||
+      chmod(drop_dir, 0700) < 0) {
+    fprintf(stderr, "LocalSend drop directory must be a private directory\n"); return 1;
+  }
+  migrate_received_files();
   v = getenv("LOCALSEND_PIN");
   if (v && *v) {
     if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
@@ -1073,7 +1105,7 @@ int main(int argc, char **argv) {
     perror("multicast membership");
   struct sockaddr_in multicast = {.sin_family=AF_INET, .sin_port=htons((uint16_t)discovery_port)};
   inet_pton(AF_INET, GROUP, &multicast.sin_addr);
-  printf("PS5 LocalSend listening on port %u, saving to %s\n", port, output_dir);
+  printf("PS5 LocalSend listening on port %u, saving to %s\n", port, drop_dir);
   printf("PS5 LocalSend PIN: %s\n", pin_configured ? "configured" : "setup required in Media tile");
 #ifndef HOST_BUILD
   notify_request notice = {0};

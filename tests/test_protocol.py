@@ -95,7 +95,7 @@ class ProtocolTest(unittest.TestCase):
             sock.sendall(b"0\r\n\r\n")
             response = sock.makefile("rb")
             self.assertIn(b" 200 ", response.readline())
-        found = list(pathlib.Path(self.tmp.name).glob("*-chunked.bin"))
+        found = list((pathlib.Path(self.tmp.name) / "drop").glob("*-chunked.bin"))
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].read_bytes(), content)
 
@@ -108,7 +108,7 @@ class ProtocolTest(unittest.TestCase):
                 + b"3\r\nabcXX0\r\n\r\n"
             )
             self.assertIn(b" 400 ", sock.makefile("rb").readline())
-        self.assertFalse(list(pathlib.Path(self.tmp.name).glob("*-malformed.bin")))
+        self.assertFalse(list((pathlib.Path(self.tmp.name) / "drop").glob("*-malformed.bin")))
         sid = path.split("sessionId=")[1].split("&")[0]
         self.request("POST", f"/api/localsend/v2/cancel?sessionId={sid}")
 
@@ -117,7 +117,7 @@ class ProtocolTest(unittest.TestCase):
         path = self.prepare("../caf\u00e9.bin", content, hashlib.sha256(content).hexdigest())
         status, _ = self.request("POST", path, content)
         self.assertEqual(status, 200)
-        found = list(pathlib.Path(self.tmp.name).glob("*-caf\u00e9.bin"))
+        found = list((pathlib.Path(self.tmp.name) / "drop").glob("*-caf\u00e9.bin"))
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].read_bytes(), content)
 
@@ -125,12 +125,12 @@ class ProtocolTest(unittest.TestCase):
         path = self.prepare("mismatch.bin", b"bad", "0" * 64)
         status, _ = self.request("POST", path, b"bad")
         self.assertEqual(status, 422)
-        self.assertFalse(list(pathlib.Path(self.tmp.name).glob("*-mismatch.bin")))
+        self.assertFalse(list((pathlib.Path(self.tmp.name) / "drop").glob("*-mismatch.bin")))
         sid = path.split("sessionId=")[1].split("&")[0]
         self.request("POST", f"/api/localsend/v2/cancel?sessionId={sid}")
 
     def test_command_line_send_to_peer(self):
-        source = pathlib.Path(self.tmp.name) / "outgoing.txt"
+        source = pathlib.Path(self.tmp.name) / "drop" / "outgoing.txt"
         source.write_bytes(b"from PS5 to peer" * 100)
         result = subprocess.run(
             [str(ROOT / "ps5-localsend.elf"), "--send", str(source), "127.0.0.1", str(self.port)],
@@ -138,12 +138,12 @@ class ProtocolTest(unittest.TestCase):
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        found = list(pathlib.Path(self.tmp.name).glob("*-outgoing.txt"))
+        found = list((pathlib.Path(self.tmp.name) / "drop").glob("*-outgoing.txt"))
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].read_bytes(), source.read_bytes())
 
     def test_browser_send_to_peer(self):
-        source = pathlib.Path(self.tmp.name) / "browser-source.txt"
+        source = pathlib.Path(self.tmp.name) / "drop" / "browser-source.txt"
         source.write_bytes(b"browser controlled send" * 100)
         status, body = self.request("POST", "/api/localsend/v2/prepare-download?pin=123456")
         self.assertEqual(status, 200)
@@ -193,7 +193,7 @@ class ProtocolTest(unittest.TestCase):
                     "POST", f"/send?sessionId={listing['sessionId']}&fileId={file_id}", form
                 )
                 self.assertEqual(status, 200)
-                found = list(pathlib.Path(destination).glob("*-browser-source.txt"))
+                found = list((pathlib.Path(destination) / "drop").glob("*-browser-source.txt"))
                 self.assertEqual(len(found), 1)
                 self.assertEqual(found[0].read_bytes(), source.read_bytes())
             finally:
@@ -215,7 +215,7 @@ class ProtocolTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(len(payload), metadata["size"])
-        self.assertEqual(payload, (pathlib.Path(self.tmp.name) / metadata["fileName"]).read_bytes())
+        self.assertEqual(payload, (pathlib.Path(self.tmp.name) / "drop" / metadata["fileName"]).read_bytes())
         status, page = self.request("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn(b"Set a PIN to enable transfers", page)
@@ -252,8 +252,16 @@ class ProtocolTest(unittest.TestCase):
                         time.sleep(0.05)
                 self.fail("first-run server did not start")
 
+            legacy = pathlib.Path(directory) / "0123456789abcdef-prior.txt"
+            legacy.write_bytes(b"previously received")
+            manual = pathlib.Path(directory) / "notes.txt"
+            manual.write_bytes(b"leave in root")
             process = start()
             try:
+                self.assertFalse(legacy.exists())
+                self.assertEqual((pathlib.Path(directory) / "drop" / legacy.name).read_bytes(),
+                                 b"previously received")
+                self.assertEqual(manual.read_bytes(), b"leave in root")
                 self.assertFalse(json.loads(request("GET", "/api/ui/status")[1])["pinSet"])
                 self.assertFalse(json.loads(request("GET", "/api/localsend/v2/info")[1])["download"])
                 self.assertEqual(request("GET", "/")[0], 200)
@@ -286,6 +294,7 @@ class ProtocolTest(unittest.TestCase):
                 self.assertNotIn("123456", pin_file.read_text())
                 self.assertEqual(pin_file.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(pathlib.Path(directory).stat().st_mode & 0o777, 0o700)
+                self.assertEqual((pathlib.Path(directory) / "drop").stat().st_mode & 0o777, 0o700)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
@@ -297,7 +306,10 @@ class ProtocolTest(unittest.TestCase):
                 self.assertFalse((pathlib.Path(directory) / ".pin").exists())
                 status, listing = request("POST", "/api/ui/list", b"pin=123456")
                 self.assertEqual(status, 200)
-                self.assertNotIn("config", [item["fileName"] for item in json.loads(listing)["files"].values()])
+                names = [item["fileName"] for item in json.loads(listing)["files"].values()]
+                self.assertIn(legacy.name, names)
+                self.assertNotIn("config", names)
+                self.assertNotIn(manual.name, names)
                 self.assertEqual(request("POST", "/api/ui/list", b"pin=654321")[0], 401)
             finally:
                 process.terminate()
