@@ -40,7 +40,7 @@ The port is optional and defaults to 53317. Omit `--https` to send to a peer usi
 
 ## Releases
 
-GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a new PS5 ELF with the pinned SDK and attaches the ELF and SHA-256 checksum to that release.
+GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a new PS5 ELF with the pinned SDK and attaches the ELF, SHA-256 checksum, GPLv3 text, third-party notices, and source directions to that release.
 
 ## Validation
 
