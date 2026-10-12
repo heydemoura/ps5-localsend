@@ -1,6 +1,9 @@
 #include "json.h"
 #include "sha256.h"
 #include "sender.h"
+#ifndef HOST_BUILD
+#include "launcher.h"
+#endif
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -19,7 +22,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef DEFAULT_PORT
 #define DEFAULT_PORT 53317
+#endif
+#ifndef DISCOVERY_PORT
+#define DISCOVERY_PORT 53317
+#endif
 #define GROUP "224.0.0.167"
 #define MAX_FILES 32
 #define MAX_PEERS 32
@@ -67,7 +75,7 @@ static char fingerprint[33];
 static char download_pin[7];
 static int pin_failures;
 static time_t pin_window;
-static char alias_name[96] = "PS5 LocalSend";
+static char alias_name[96];
 static char output_dir[512] = "/data/localsend";
 static unsigned port = DEFAULT_PORT;
 
@@ -104,6 +112,7 @@ typedef struct {
   char message[3075];
 } notify_request;
 int sceKernelSendNotificationRequest(int, notify_request *, size_t, int);
+int sceSystemServiceParamGetString(int, char *, size_t);
 #endif
 
 static void random_hex(char *out, size_t bytes) {
@@ -161,18 +170,18 @@ static int info(char *out, size_t cap, int announce) {
   return n < 0 || (size_t)n >= cap ? -1 : n;
 }
 
-static int parse_content_length(const char *headers, uint64_t *length) {
+static int parse_framing(const char *headers, uint64_t *length, int *chunked) {
   const char *p = strstr(headers, "\r\n") ;
   if (!p) return -1;
   p += 2;
-  int seen = 0;
+  int seen_length = 0, seen_chunked = 0;
   while (*p && !(p[0] == '\r' && p[1] == '\n')) {
     const char *end = strstr(p, "\r\n");
     if (!end) return -1;
     const char *colon = memchr(p, ':', (size_t)(end-p));
     if (!colon) return -1;
     if ((size_t)(colon-p) == 14 && !strncasecmp(p, "Content-Length", 14)) {
-      if (seen++) return -1;
+      if (seen_length++) return -1;
       const char *v = colon + 1;
       while (v < end && (*v == ' ' || *v == '\t')) ++v;
       if (v == end) return -1;
@@ -185,11 +194,23 @@ static int parse_content_length(const char *headers, uint64_t *length) {
       if (v != end) return -1;
       *length = n;
     } else if ((size_t)(colon-p) == 17 && !strncasecmp(p, "Transfer-Encoding", 17)) {
-      return -1;
+      if (seen_chunked++) return -1;
+      const char *v = colon + 1;
+      while (v < end && (*v == ' ' || *v == '\t')) ++v;
+      while (end > v && (end[-1] == ' ' || end[-1] == '\t')) --end;
+      if (end-v != 7 || strncasecmp(v, "chunked", 7)) return -1;
+      end = strstr(p, "\r\n");
     }
     p = end + 2;
   }
-  return seen ? 0 : -1;
+  if (seen_length == seen_chunked) return -1;
+  *chunked = seen_chunked;
+  return 0;
+}
+
+static int parse_content_length(const char *headers, uint64_t *length) {
+  int chunked;
+  return parse_framing(headers, length, &chunked) < 0 || chunked ? -1 : 0;
 }
 
 static int query_value(const char *query, const char *key, char *out, size_t cap) {
@@ -298,9 +319,69 @@ static int prepare(const char *body, size_t len, struct in_addr peer, char *resp
   return 200;
 }
 
+typedef struct {
+  int fd;
+  const char *initial;
+  size_t initial_len;
+} body_reader;
+
+static ssize_t body_read(body_reader *r, void *buf, size_t len) {
+  if (r->initial_len) {
+    if (len > r->initial_len) len = r->initial_len;
+    memcpy(buf, r->initial, len);
+    r->initial += len;
+    r->initial_len -= len;
+    return (ssize_t)len;
+  }
+  return recv(r->fd, buf, len, 0);
+}
+
+static int body_exact(body_reader *r, void *buf, size_t len) {
+  char *p = buf;
+  while (len) {
+    ssize_t n = body_read(r, p, len);
+    if (n <= 0) return -1;
+    p += n;
+    len -= (size_t)n;
+  }
+  return 0;
+}
+
+static int body_line(body_reader *r, char *line, size_t cap) {
+  size_t n = 0;
+  for (;;) {
+    char c;
+    if (body_exact(r, &c, 1) < 0 || n + 1 >= cap) return -1;
+    line[n++] = c;
+    if (c == '\n') {
+      if (n < 2 || line[n-2] != '\r') return -1;
+      line[n-2] = 0;
+      return 0;
+    }
+  }
+}
+
+static int chunk_size(const char *line, uint64_t *size) {
+  uint64_t n = 0;
+  int digits = 0;
+  for (; *line && *line != ';'; ++line) {
+    unsigned v;
+    if (*line >= '0' && *line <= '9') v = (unsigned)(*line - '0');
+    else if (*line >= 'a' && *line <= 'f') v = (unsigned)(*line - 'a' + 10);
+    else if (*line >= 'A' && *line <= 'F') v = (unsigned)(*line - 'A' + 10);
+    else return -1;
+    if (n > (UINT64_MAX - v) / 16) return -1;
+    n = n * 16 + v;
+    ++digits;
+  }
+  if (!digits) return -1;
+  *size = n;
+  return 0;
+}
+
 static int write_file(int fd, const char *initial, size_t initial_len, uint64_t length,
-                      transfer_file *f) {
-  if (length != f->size) return 400;
+                      int chunked, transfer_file *f) {
+  if (!chunked && length != f->size) return 400;
   char temp[1024], final[1024], suffix[17];
   random_hex(suffix, 8);
   if (snprintf(temp, sizeof(temp), "%s/.%s.part", output_dir, suffix) >= (int)sizeof(temp) ||
@@ -312,31 +393,42 @@ static int write_file(int fd, const char *initial, size_t initial_len, uint64_t 
   uint64_t total = 0;
   int status = 200;
   char buf[CHUNK];
-  while (total < length) {
-    const char *data = buf;
-    size_t n;
-    if (initial_len) {
-      n = initial_len;
-      if ((uint64_t)n > length-total) n = (size_t)(length-total);
-      data = initial;
-      initial += n;
-      initial_len -= n;
-    } else {
-      n = length-total < CHUNK ? (size_t)(length-total) : CHUNK;
-      ssize_t r = recv(fd, buf, n, 0);
-      if (r <= 0) { status = 400; break; }
-      n = (size_t)r;
+  body_reader reader = {fd, initial, initial_len};
+  uint64_t remaining = chunked ? 0 : length;
+  for (;;) {
+    if (chunked && !remaining) {
+      char line[1024];
+      if (body_line(&reader, line, sizeof(line)) < 0 || chunk_size(line, &remaining) < 0 ||
+          remaining > f->size-total) { status = 400; break; }
+      if (!remaining) {
+        do {
+          if (body_line(&reader, line, sizeof(line)) < 0) { status = 400; break; }
+        } while (line[0]);
+        break;
+      }
     }
-    sha256_update(&hash, data, n);
+    if (!chunked && !remaining) break;
+    size_t want = remaining < CHUNK ? (size_t)remaining : CHUNK;
+    ssize_t n = body_read(&reader, buf, want);
+    if (n <= 0) { status = 400; break; }
+    sha256_update(&hash, buf, (size_t)n);
     size_t sent = 0;
-    while (sent < n) {
-      ssize_t w = write(out, data + sent, n - sent);
+    while (sent < (size_t)n) {
+      ssize_t w = write(out, buf + sent, (size_t)n - sent);
       if (w <= 0) { status = 500; break; }
       sent += (size_t)w;
     }
     if (status != 200) break;
-    total += n;
+    total += (size_t)n;
+    remaining -= (size_t)n;
+    if (chunked && !remaining) {
+      char crlf[2];
+      if (body_exact(&reader, crlf, 2) < 0 || memcmp(crlf, "\r\n", 2)) {
+        status = 400; break;
+      }
+    }
   }
+  if (status == 200 && total != f->size) status = 400;
   if (close(out) != 0) status = 500;
   if (status == 200 && f->sha256[0]) {
     unsigned char digest[32];
@@ -351,7 +443,7 @@ static int write_file(int fd, const char *initial, size_t initial_len, uint64_t 
   if (status != 200) unlink(temp);
   if (status == 200) {
     f->done = 1;
-    printf("LocalSend: received %s (%" PRIu64 " bytes)\n", final, length);
+    printf("LocalSend: received %s (%" PRIu64 " bytes)\n", final, total);
   }
   return status;
 }
@@ -687,17 +779,18 @@ static void handle_http(int fd, struct in_addr peer) {
   if (!strcmp(method, "POST") && !strcmp(target, "/api/localsend/v2/upload")) {
     char sid[64], id[128], token[64];
     uint64_t length;
+    int chunked;
     if (!query || query_value(query, "sessionId", sid, sizeof(sid)) < 0 ||
         query_value(query, "fileId", id, sizeof(id)) < 0 ||
         query_value(query, "token", token, sizeof(token)) < 0 ||
-        parse_content_length(header, &length) < 0) { reply(fd, 400, NULL); return; }
+        parse_framing(header, &length, &chunked) < 0) { reply(fd, 400, NULL); return; }
     if (!session.count || time(NULL) > session.expires || strcmp(sid, session.id) ||
         peer.s_addr != session.peer.s_addr) { reply(fd, 403, NULL); return; }
     transfer_file *f = NULL;
     for (int i = 0; i < session.count; ++i)
       if (!strcmp(id, session.files[i].id) && !strcmp(token, session.files[i].token)) f = &session.files[i];
     if (!f || f->done) { reply(fd, 403, NULL); return; }
-    int status = write_file(fd, header+header_len, used-header_len, length, f);
+    int status = write_file(fd, header+header_len, used-header_len, length, chunked, f);
     reply(fd, status, NULL);
     int all_done = 1;
     for (int i = 0; i < session.count; ++i) if (!session.files[i].done) all_done = 0;
@@ -716,6 +809,14 @@ static void announce(int udp, const struct sockaddr_in *destination, int mode) {
 
 int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
+  int name_ok = 0;
+#ifndef HOST_BUILD
+  name_ok = sceSystemServiceParamGetString(6, alias_name, sizeof(alias_name)) == 0 && alias_name[0];
+#endif
+  if (!name_ok) name_ok = gethostname(alias_name, sizeof(alias_name)) == 0 && alias_name[0];
+  if (!name_ok)
+    strcpy(alias_name, "PlayStation 5");
+  alias_name[sizeof(alias_name)-1] = 0;
   const char *v = getenv("LOCALSEND_DIR");
   if (v && *v && strlen(v) < sizeof(output_dir)) strcpy(output_dir, v);
   v = getenv("LOCALSEND_ALIAS");
@@ -763,9 +864,16 @@ int main(int argc, char **argv) {
   setsockopt(udp, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   struct sockaddr_in bind_addr = {.sin_family=AF_INET, .sin_port=htons((uint16_t)port)};
   bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  struct sockaddr_in udp_addr = bind_addr;
+#ifdef HOST_BUILD
+  unsigned discovery_port = port;
+#else
+  unsigned discovery_port = DISCOVERY_PORT;
+#endif
+  udp_addr.sin_port = htons((uint16_t)discovery_port);
   if (bind(tcp, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0 ||
       listen(tcp, 8) < 0 ||
-      bind(udp, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+      bind(udp, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0) {
     perror("bind/listen"); return 1;
   }
   struct ip_mreq group = {0};
@@ -773,7 +881,7 @@ int main(int argc, char **argv) {
   group.imr_interface.s_addr = htonl(INADDR_ANY);
   if (setsockopt(udp, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0)
     perror("multicast membership");
-  struct sockaddr_in multicast = {.sin_family=AF_INET, .sin_port=htons((uint16_t)port)};
+  struct sockaddr_in multicast = {.sin_family=AF_INET, .sin_port=htons((uint16_t)discovery_port)};
   inet_pton(AF_INET, GROUP, &multicast.sin_addr);
   printf("PS5 LocalSend listening on port %u, saving to %s\n", port, output_dir);
   printf("PS5 LocalSend download PIN: %s\n", download_pin);
@@ -781,6 +889,8 @@ int main(int argc, char **argv) {
   notify_request notice = {0};
   snprintf(notice.message, sizeof(notice.message), "PS5 LocalSend download PIN: %s", download_pin);
   sceKernelSendNotificationRequest(0, &notice, sizeof(notice), 0);
+  if (launcher_install_if_needed(port) < 0)
+    fprintf(stderr, "LocalSend Media launcher installation failed\n");
 #endif
   time_t last = 0;
   for (;;) {

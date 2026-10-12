@@ -1,11 +1,11 @@
 # ps5-localsend
 
-A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https://github.com/localsend/protocol) using the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk). It appears as **PS5 LocalSend** on the local network and receives files from LocalSend clients into `/data/localsend`.
+A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https://github.com/localsend/protocol) using the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk). It appears under the PS5's console name (for example, `PS5-090`) on the local network and receives files from LocalSend clients into `/data/localsend`.
 
 ## Current support
 
 - LocalSend v2 discovery on UDP multicast `224.0.0.167:53317`, plus HTTP `/register` and `/info`.
-- HTTP `/prepare-upload`, `/upload`, and `/cancel` with per-file session tokens, size checks, SHA-256 verification, and filename sanitization.
+- HTTP `/prepare-upload`, `/upload`, and `/cancel` with per-file session tokens, content-length or chunked uploads, size checks, SHA-256 verification, and filename sanitization.
 - Headless receiving into `/data/localsend`. Uploaded files get a random prefix to avoid replacing existing files.
 - Command-line sending to HTTP or HTTPS LocalSend peers with the standard prepare/upload flow. HTTPS uses the PS5's `libSceHttp`.
 - PIN-protected LocalSend `/prepare-download` and `/download` API, plus a browser page for downloading PS5 files and sending them to a discovered peer or a manually entered IPv4 address.
@@ -26,9 +26,9 @@ The output is `ps5-localsend.elf`. To run host integration tests:
 make HOST=1 test
 ```
 
-Deploy the ELF using a supported PS5 ELF loader. The payload stays running, discovers LocalSend peers, and auto accepts uploads. A writable `/data` partition is required. The payload shows a six-digit download PIN in a PS5 notification and writes it to the loader log. Open `http://<PS5-IP>:53317/` in a browser and enter the PIN to download files from `/data/localsend` or send one of those files to a discovered peer or manually entered IPv4 address. LocalSend clients can use that PIN with `/prepare-download`.
+Deploy the ELF using a supported PS5 ELF loader. The payload stays running, discovers LocalSend peers, and auto accepts uploads. A writable `/data` partition is required. On first startup it installs a **LocalSend** shortcut in the PS5 Media tab; opening the tile loads the web control page at `http://127.0.0.1:53317/`. The payload shows a six-digit download PIN in a PS5 notification and writes it to the loader log. Open the tile or `http://<PS5-IP>:53317/` in a browser and enter the PIN to download files from `/data/localsend` or send one of those files to a discovered peer or manually entered IPv4 address. LocalSend clients can use that PIN with `/prepare-download`.
 
-`LOCALSEND_DIR`, `LOCALSEND_PORT`, `LOCALSEND_ALIAS`, and `LOCALSEND_PIN` can override the defaults if provided by the loader. `LOCALSEND_PIN` must contain exactly six digits. This also makes local testing easier.
+`LOCALSEND_DIR`, `LOCALSEND_PORT`, `LOCALSEND_ALIAS`, and `LOCALSEND_PIN` can override the defaults if provided by the loader. Without `LOCALSEND_ALIAS`, the payload reads the console name from `libSceSystemService`. `LOCALSEND_PIN` must contain exactly six digits. This also makes local testing easier.
 
 To send a file from the PS5, start another instance with arguments (for example using a loader that supports payload arguments):
 
@@ -44,7 +44,7 @@ GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a 
 
 ## Validation
 
-`make HOST=1 test` exercises discovery data, upload, download, PIN checks, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. Compatibility with the official LocalSend app still needs device testing.
+`make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, PIN checks, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, and the Media tile was confirmed to open the control page on hardware. Compatibility with the official LocalSend app still needs another device test after its earlier HTTP 400 response.
 
 ## License
 

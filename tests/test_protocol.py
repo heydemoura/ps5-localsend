@@ -70,6 +70,38 @@ class ProtocolTest(unittest.TestCase):
             info = json.loads(body)
             self.assertEqual(info["protocol"], "http")
             self.assertEqual(info["deviceModel"], "PlayStation 5")
+            self.assertEqual(info["alias"], socket.gethostname())
+
+    def test_chunked_upload(self):
+        content = b"official client chunked upload\x00" * 1500
+        path = self.prepare("chunked.bin", content, hashlib.sha256(content).hexdigest())
+        with socket.create_connection(("127.0.0.1", self.port), timeout=20) as sock:
+            sock.sendall(
+                f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n".encode()
+            )
+            for offset in range(0, len(content), 997):
+                chunk = content[offset:offset + 997]
+                sock.sendall(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            sock.sendall(b"0\r\n\r\n")
+            response = sock.makefile("rb")
+            self.assertIn(b" 200 ", response.readline())
+        found = list(pathlib.Path(self.tmp.name).glob("*-chunked.bin"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].read_bytes(), content)
+
+    def test_malformed_chunked_upload_rejected(self):
+        path = self.prepare("malformed.bin", b"abc")
+        with socket.create_connection(("127.0.0.1", self.port), timeout=20) as sock:
+            sock.sendall(
+                f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n".encode()
+                + b"3\r\nabcXX0\r\n\r\n"
+            )
+            self.assertIn(b" 400 ", sock.makefile("rb").readline())
+        self.assertFalse(list(pathlib.Path(self.tmp.name).glob("*-malformed.bin")))
+        sid = path.split("sessionId=")[1].split("&")[0]
+        self.request("POST", f"/api/localsend/v2/cancel?sessionId={sid}")
 
     def test_upload_unicode_name_and_hash(self):
         content = b"ps5-localsend integration test\x00" * 1000
