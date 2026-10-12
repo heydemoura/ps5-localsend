@@ -129,7 +129,24 @@ class ProtocolTest(unittest.TestCase):
                         time.sleep(0.05)
                 else:
                     self.fail("second receiver did not start")
-                form = urllib.parse.urlencode({"peer": "127.0.0.1", "port": remote_port}).encode()
+                announcement = json.dumps({
+                    "alias": "Peer B", "version": "2.0", "fingerprint": "peer-b",
+                    "port": remote_port, "protocol": "http", "announce": False,
+                }).encode()
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.sendto(announcement, ("127.0.0.1", self.port))
+                for _ in range(50):
+                    _, page = self.request("GET", "/?pin=123456")
+                    if b"Peer B" in page:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("discovered peer did not appear in browser")
+                status, body = self.request("POST", "/api/localsend/v2/prepare-download?pin=123456")
+                self.assertEqual(status, 200)
+                listing = json.loads(body)
+                file_id = next(key for key, value in listing["files"].items() if value["fileName"] == source.name)
+                form = urllib.parse.urlencode({"target": "peer-b"}).encode()
                 status, _ = self.request(
                     "POST", f"/send?sessionId={listing['sessionId']}&fileId={file_id}", form
                 )

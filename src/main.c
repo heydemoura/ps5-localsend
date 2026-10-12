@@ -22,6 +22,7 @@
 #define DEFAULT_PORT 53317
 #define GROUP "224.0.0.167"
 #define MAX_FILES 32
+#define MAX_PEERS 32
 #define MAX_METADATA 65536
 #define HEADER_CAP 16384
 #define CHUNK 16384
@@ -50,8 +51,18 @@ typedef struct {
   time_t expires;
 } download_session;
 
+typedef struct {
+  char alias[96];
+  char fingerprint[128];
+  struct in_addr address;
+  unsigned port;
+  int secure;
+  time_t seen;
+} discovered_peer;
+
 static transfer_session session;
 static download_session downloads;
+static discovered_peer peers[MAX_PEERS];
 static char fingerprint[33];
 static char download_pin[7];
 static int pin_failures;
@@ -59,6 +70,33 @@ static time_t pin_window;
 static char alias_name[96] = "PS5 LocalSend";
 static char output_dir[512] = "/data/localsend";
 static unsigned port = DEFAULT_PORT;
+
+static void remember_peer(const json_doc *d, struct in_addr address) {
+  char fp[128], name[96], protocol[16];
+  uint64_t peer_port;
+  if (d->tokens[0].type != '{' ||
+      json_string(d, json_field(d, 0, "fingerprint"), fp, sizeof(fp)) < 0 ||
+      !*fp || !strcmp(fp, fingerprint) ||
+      json_string(d, json_field(d, 0, "alias"), name, sizeof(name)) < 0 ||
+      json_string(d, json_field(d, 0, "protocol"), protocol, sizeof(protocol)) < 0 ||
+      json_u64(d, json_field(d, 0, "port"), &peer_port) < 0 ||
+      peer_port == 0 || peer_port > 65535 ||
+      (strcmp(protocol, "http") && strcmp(protocol, "https"))) return;
+  int slot = 0;
+  time_t oldest = peers[0].seen;
+  for (int i = 0; i < MAX_PEERS; ++i) {
+    if (!peers[i].fingerprint[0] || !strcmp(peers[i].fingerprint, fp)) { slot = i; break; }
+    if (peers[i].seen < oldest) { oldest = peers[i].seen; slot = i; }
+  }
+  if (slot < 0) return;
+  discovered_peer *p = &peers[slot];
+  strcpy(p->alias, name);
+  strcpy(p->fingerprint, fp);
+  p->address = address;
+  p->port = (unsigned)peer_port;
+  p->secure = !strcmp(protocol, "https");
+  p->seen = time(NULL);
+}
 
 #ifndef HOST_BUILD
 typedef struct {
@@ -411,7 +449,7 @@ static void browser_page(int fd, const char *query, struct in_addr peer) {
   if (code != 200) { reply_type(fd, code, "text/html; charset=utf-8", form); return; }
   code = create_download_session(peer, NULL);
   if (code != 200) { reply(fd, code, NULL); return; }
-  char page[32768];
+  static char page[131072];
   size_t used = 0;
   int n = snprintf(page, sizeof(page),
     "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -425,11 +463,28 @@ static void browser_page(int fd, const char *query, struct in_addr peer) {
     n = snprintf(page + used, sizeof(page) - used,
       "<li><a href='/api/localsend/v2/download?sessionId=%s&amp;fileId=%s'>%s</a> (%" PRIu64 " bytes)"
       "<form method=post action='/send?sessionId=%s&amp;fileId=%s'>"
-      "<label>Peer IPv4 <input name=peer required></label>"
-      "<label>Port <input name=port type=number min=1 max=65535 value=53317 required></label>"
-      "<label><input name=secure type=checkbox value=1> HTTPS</label>"
-      "<button>Send</button></form></li>",
+      "<label>Discovered peer <select name=target><option value=''>Manual address</option>",
       downloads.id, f->id, name, f->size, downloads.id, f->id);
+    if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
+    used += (size_t)n;
+    for (int j = 0; j < MAX_PEERS; ++j) {
+      discovered_peer *p = &peers[j];
+      if (!p->fingerprint[0] || time(NULL) - p->seen > 120) continue;
+      char id_html[512], alias_html[512], ip[INET_ADDRSTRLEN];
+      if (html_escape(p->fingerprint, id_html, sizeof(id_html)) < 0 ||
+          html_escape(p->alias, alias_html, sizeof(alias_html)) < 0 ||
+          !inet_ntop(AF_INET, &p->address, ip, sizeof(ip))) continue;
+      n = snprintf(page + used, sizeof(page) - used,
+        "<option value='%s'>%s (%s:%u %s)</option>", id_html, alias_html,
+        ip, p->port, p->secure ? "HTTPS" : "HTTP");
+      if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
+      used += (size_t)n;
+    }
+    n = snprintf(page + used, sizeof(page) - used,
+      "</select></label><label>IPv4 <input name=peer></label>"
+      "<label>Port <input name=port type=number min=1 max=65535 value=53317></label>"
+      "<label><input name=secure type=checkbox value=1> HTTPS for manual address</label>"
+      "<button>Send</button></form></li>");
     if (n < 0 || (size_t)n >= sizeof(page) - used) { reply(fd, 500, NULL); return; }
     used += (size_t)n;
   }
@@ -499,16 +554,32 @@ static void browser_send(int fd, const char *query, struct in_addr peer,
     have += (size_t)n;
   }
   form[have] = 0;
-  char address[64], port_text[16], secure_text[8];
-  if (query_value(form, "peer", address, sizeof(address)) < 0 ||
-      query_value(form, "port", port_text, sizeof(port_text)) < 0) {
-    reply(fd, 400, NULL); return;
+  char address[64] = {0}, port_text[16], secure_text[8], target[128] = {0};
+  unsigned remote_port = DEFAULT_PORT;
+  int secure = 0;
+  query_value(form, "target", target, sizeof(target));
+  if (*target) {
+    discovered_peer *selected = NULL;
+    for (int i = 0; i < MAX_PEERS; ++i)
+      if (!strcmp(peers[i].fingerprint, target) && time(NULL) - peers[i].seen <= 120)
+        selected = &peers[i];
+    if (!selected || !inet_ntop(AF_INET, &selected->address, address, sizeof(address))) {
+      reply(fd, 400, NULL); return;
+    }
+    remote_port = selected->port;
+    secure = selected->secure;
+  } else {
+    if (query_value(form, "peer", address, sizeof(address)) < 0 ||
+        query_value(form, "port", port_text, sizeof(port_text)) < 0) {
+      reply(fd, 400, NULL); return;
+    }
+    char *end;
+    unsigned long parsed_port = strtoul(port_text, &end, 10);
+    if (*end || parsed_port == 0 || parsed_port > 65535) { reply(fd, 400, NULL); return; }
+    remote_port = (unsigned)parsed_port;
+    secure = query_value(form, "secure", secure_text, sizeof(secure_text)) == 0 &&
+             !strcmp(secure_text, "1");
   }
-  char *end;
-  unsigned long remote_port = strtoul(port_text, &end, 10);
-  if (*end || remote_port == 0 || remote_port > 65535) { reply(fd, 400, NULL); return; }
-  int secure = query_value(form, "secure", secure_text, sizeof(secure_text)) == 0 &&
-               !strcmp(secure_text, "1");
   char path[1024];
   if (snprintf(path, sizeof(path), "%s/%s", output_dir, f->name) >= (int)sizeof(path)) {
     reply(fd, 500, NULL); return;
@@ -516,7 +587,7 @@ static void browser_send(int fd, const char *query, struct in_addr peer,
   struct stat st;
   if (lstat(path, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
       (uint64_t)st.st_size != f->size) { reply(fd, 409, NULL); return; }
-  int sent = send_file_to_peer(path, address, (unsigned)remote_port,
+  int sent = send_file_to_peer(path, address, remote_port,
                                alias_name, fingerprint, port, secure);
   reply_type(fd, sent ? 500 : 200, "text/html; charset=utf-8",
              sent ? "<!doctype html><h1>Send failed</h1><p>Check the loader log.</p>" :
@@ -727,6 +798,7 @@ int main(int argc, char **argv) {
       if (n > 0) {
         json_doc *d = malloc(sizeof(*d));
         if (d && json_parse(d, data, (size_t)n) == 0) {
+          remember_peer(d, from.sin_addr);
           char fp[64]; int is_announce = 0;
           int f = json_field(d, 0, "fingerprint");
           int a = json_field(d, 0, "announce");
