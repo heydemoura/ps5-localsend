@@ -2,6 +2,10 @@
 
 A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https://github.com/localsend/protocol) using the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk). It appears under the PS5's console name (for example, `PS5-090`) on the local network and receives files from LocalSend clients into `/data/localsend/drop`.
 
+![LocalSend dashboard served by a PS5, showing the locked files view](docs/ps5-dashboard.png)
+
+Dashboard served by the running PS5 payload, viewed in a browser before entering the PIN.
+
 ## Current support
 
 - LocalSend v2 discovery on UDP multicast `224.0.0.167:53317`, plus HTTP `/register` and `/info`.
