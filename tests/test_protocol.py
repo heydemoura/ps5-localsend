@@ -348,6 +348,57 @@ class ProtocolTest(unittest.TestCase):
                 process.wait(timeout=5)
                 process.stderr.close()
 
+    def test_new_instance_replaces_previous_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def unused_port():
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    return sock.getsockname()[1]
+
+            old_port, new_port = unused_port(), unused_port()
+            while new_port == old_port:
+                new_port = unused_port()
+
+            def start(port):
+                env = {**os.environ, "LOCALSEND_DIR": directory,
+                       "LOCALSEND_PORT": str(port), "LOCALSEND_PIN": "123456"}
+                process = subprocess.Popen([str(ROOT / "ps5-localsend.elf")], env=env,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                for _ in range(100):
+                    if process.poll() is not None:
+                        self.fail(f"instance exited early: {process.stderr.read()!r}")
+                    try:
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+                        conn.request("GET", "/api/ui/status")
+                        response = conn.getresponse()
+                        response.read()
+                        conn.close()
+                        if response.status == 200:
+                            return process
+                    except OSError:
+                        time.sleep(0.05)
+                self.fail("instance did not start")
+
+            first = start(old_port)
+            second = None
+            try:
+                second = start(new_port)
+                self.assertEqual(first.wait(timeout=5), 0)
+                with self.assertRaises(OSError):
+                    socket.create_connection(("127.0.0.1", old_port), timeout=1)
+                record = pathlib.Path(directory) / ".instance.lock"
+                self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(int(record.read_text().split()[0]), second.pid)
+            finally:
+                if first.poll() is None:
+                    first.terminate()
+                    first.wait(timeout=5)
+                first.stderr.close()
+                if second is not None:
+                    second.terminate()
+                    second.wait(timeout=5)
+                    second.stderr.close()
+
     def test_wrong_token_rejected(self):
         path = self.prepare("secret.bin", b"abc")
         status, _ = self.request("POST", path.split("&token=")[0] + "&token=wrong", b"abc")

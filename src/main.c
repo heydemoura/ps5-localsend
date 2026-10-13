@@ -86,6 +86,12 @@ static char alias_name[96];
 static char output_dir[512] = "/data/localsend";
 static char drop_dir[sizeof(output_dir) + 6];
 static unsigned port = DEFAULT_PORT;
+static volatile sig_atomic_t stop_requested;
+
+static void stop_signal(int signal_number) {
+  (void)signal_number;
+  stop_requested = 1;
+}
 
 static void remember_peer(const json_doc *d, struct in_addr address) {
   char fp[128], name[96], protocol[16];
@@ -625,6 +631,51 @@ static int load_pin(void) {
   return 0;
 }
 
+static int acquire_instance_lock(void) {
+  char path[sizeof(output_dir) + 24];
+  const char *lock_dir = output_dir;
+#ifndef HOST_BUILD
+  /* One lock for the whole console, including custom receive directories. */
+  lock_dir = "/data/localsend";
+  if (mkdir(lock_dir, 0700) < 0 && errno != EEXIST) return -1;
+  struct stat dir_stat;
+  if (lstat(lock_dir, &dir_stat) < 0 || !S_ISDIR(dir_stat.st_mode) ||
+      chmod(lock_dir, 0700) < 0) return -1;
+#endif
+  int path_length = snprintf(path, sizeof(path), "%s/.instance.lock", lock_dir);
+  if (path_length < 0 || (size_t)path_length >= sizeof(path)) return -1;
+  int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+  if (fd < 0) return -1;
+  struct stat st;
+  if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || fchmod(fd, 0600) < 0) {
+    close(fd); return -1;
+  }
+  pid_t signalled = 0;
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    struct flock request = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    if (fcntl(fd, F_SETLK, &request) == 0) {
+      char record[64];
+      int length = snprintf(record, sizeof(record), "%ld %u\n", (long)getpid(), port);
+      if (length <= 0 || (size_t)length >= sizeof(record) || ftruncate(fd, 0) < 0 ||
+          write(fd, record, (size_t)length) != length || fsync(fd) < 0) {
+        close(fd); return -1;
+      }
+      return fd;
+    }
+    if (errno != EACCES && errno != EAGAIN) break;
+    if (fcntl(fd, F_GETLK, &request) < 0) break;
+    if (request.l_type != F_UNLCK && request.l_pid > 1 && request.l_pid != getpid() &&
+        request.l_pid != signalled) {
+      if (kill(request.l_pid, SIGTERM) < 0 && errno != ESRCH) break;
+      signalled = request.l_pid;
+    }
+    struct timespec pause = {.tv_nsec = 50000000};
+    nanosleep(&pause, NULL);
+  }
+  close(fd);
+  return -1;
+}
+
 static int legacy_receive_name(const char *name) {
   if (strlen(name) < 18 || name[16] != '-') return 0;
   for (int i = 0; i < 16; ++i) if (hex_value(name[i]) < 0) return 0;
@@ -1046,7 +1097,6 @@ int main(int argc, char **argv) {
       chmod(drop_dir, 0700) < 0) {
     fprintf(stderr, "LocalSend drop directory must be a private directory\n"); return 1;
   }
-  migrate_received_files();
   v = getenv("LOCALSEND_PIN");
   if (v && *v) {
     if (strlen(v) != 6 || strspn(v, "0123456789") != 6) {
@@ -1078,6 +1128,13 @@ int main(int argc, char **argv) {
     }
     return send_file_to_peer(argv[2], argv[3], remote_port, alias_name, fingerprint, port, secure);
   }
+  signal(SIGTERM, stop_signal);
+  signal(SIGINT, stop_signal);
+  int instance_fd = acquire_instance_lock();
+  if (instance_fd < 0) {
+    fprintf(stderr, "Could not replace the previous LocalSend instance\n"); return 1;
+  }
+  migrate_received_files();
   int tcp = socket(AF_INET, SOCK_STREAM, 0);
   int udp = socket(AF_INET, SOCK_DGRAM, 0);
   if (tcp < 0 || udp < 0) { perror("socket"); return 1; }
@@ -1116,7 +1173,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "LocalSend Media launcher installation failed\n");
 #endif
   time_t last = 0;
-  for (;;) {
+  while (!stop_requested) {
     time_t now = time(NULL);
     if (now - last >= 30) { announce(udp, &multicast, 1); last = now; }
     fd_set readfds;
@@ -1149,5 +1206,6 @@ int main(int argc, char **argv) {
     }
   }
   close(tcp); close(udp);
-  return 1;
+  close(instance_fd);
+  return stop_requested ? 0 : 1;
 }
