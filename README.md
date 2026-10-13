@@ -1,6 +1,6 @@
 # ps5-localsend
 
-A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https://github.com/localsend/protocol) using the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk). It appears under the PS5's console name (for example, `PS5-090`) on the local network and receives files from LocalSend clients into `/data/localsend/drop`.
+A native PlayStation 5 ELF payload implementing the [LocalSend protocol](https://github.com/localsend/protocol) using the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk). It appears under the PS5's console name (for example, `PS5-090`) on the local network and receives files from LocalSend clients into `/data/localsend/drop` by default.
 
 ![LocalSend dashboard served by a PS5, showing the locked files view](docs/ps5-dashboard.png)
 
@@ -10,7 +10,7 @@ Dashboard served by the running PS5 payload, viewed in a browser before entering
 
 - LocalSend v2 discovery on UDP multicast `224.0.0.167:53317`, plus HTTP `/register` and `/info`.
 - HTTP `/prepare-upload`, `/upload`, and `/cancel` with per-file session tokens, content-length or chunked uploads, size checks, SHA-256 verification, and filename sanitization.
-- Headless receiving into `/data/localsend/drop`. Uploaded files get a random prefix to avoid replacing existing files. Transfers stay disabled until a PIN is configured.
+- Headless receiving into a folder selected in the dashboard (default `/data/localsend/drop`). Uploaded files get a random prefix to avoid replacing existing files. Transfers stay disabled until a PIN is configured.
 - Command-line sending to HTTP or HTTPS LocalSend peers with the standard prepare/upload flow. HTTPS uses the PS5's `libSceHttp`.
 - PIN-protected LocalSend `/prepare-download` and `/download` API, plus a responsive browser dashboard for downloading PS5 files and sending them to a discovered peer or a manually entered IPv4 address.
 
@@ -34,9 +34,9 @@ Deploy the ELF using a supported PS5 ELF loader. The payload stays running and d
 
 Starting the payload again replaces the running instance. It signals the owner of `/data/localsend/.instance.lock`, waits for that process to exit, then starts on the configured port (53317 by default). A failed handoff stops startup rather than selecting another port. The lock is held for the lifetime of the server; `--send` runs do not replace it. Payloads from before this lock was added require a one-time stop or console restart before the first upgraded launch.
 
-After setup, open the tile or `http://<PS5-IP>:53317/` in a browser and enter the PIN to view files, download them, or send one to a discovered peer or manual IPv4 address. The dashboard itself remains accessible without entering a PIN. The page uses HTTP, so enter the PIN only on a trusted LAN. LocalSend clients can also use the PIN with `/prepare-download`.
+After setup, open the tile or `http://<PS5-IP>:53317/` in a browser and enter the PIN to view files, download them, or send one to a discovered peer or manual IPv4 address. In **Receive folder**, browse the PS5's folders or enter an absolute path, then select **Save folder**. The folder must already exist and be writable by the payload. New incoming files go there; existing files stay in their original folder. The file list and outgoing sends use the selected folder. The selection survives payload restarts in `/data/localsend/receive-dir` (or under `LOCALSEND_DIR` if that is overridden) with owner-only permissions. If the selected folder is unavailable at startup, the payload stops with an error instead of saving files elsewhere. The dashboard itself remains accessible without entering a PIN. The page uses HTTP, so enter the PIN only on a trusted LAN. LocalSend clients can also use the PIN with `/prepare-download`.
 
-`LOCALSEND_DIR`, `LOCALSEND_PORT`, `LOCALSEND_ALIAS`, and `LOCALSEND_PIN` can override the defaults if provided by the loader. `LOCALSEND_DIR` selects the base directory; received files go into its `drop` subdirectory. Without `LOCALSEND_ALIAS`, the payload reads the console name from `libSceSystemService`. `LOCALSEND_PIN` must contain exactly six digits; when set, it takes precedence over the stored PIN and skips first-run setup. This also makes local testing easier.
+`LOCALSEND_DIR`, `LOCALSEND_PORT`, `LOCALSEND_ALIAS`, and `LOCALSEND_PIN` can override the defaults if provided by the loader. `LOCALSEND_DIR` selects the base directory; received files go into its `drop` subdirectory until a different folder is saved in the dashboard. Without `LOCALSEND_ALIAS`, the payload reads the console name from `libSceSystemService`. `LOCALSEND_PIN` must contain exactly six digits; when set, it takes precedence over the stored PIN and skips first-run setup. This also makes local testing easier.
 
 To send a file from the PS5, start another instance with arguments (for example using a loader that supports payload arguments):
 
@@ -52,7 +52,7 @@ GitHub Actions builds and tests on pushes. Publishing a GitHub release builds a 
 
 ## Validation
 
-`make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, first-run PIN setup and persistence, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, the Media tile opened the dashboard, first-run PIN setup worked on hardware, and the official LocalSend app successfully sent an image in a prior build.
+`make HOST=1 test` exercises discovery data, content-length and chunked uploads, download, first-run PIN setup and persistence, receive-folder selection across restarts, browser controlled sending, and SHA-256 checks. The ELF also built with SDK v0.44 and completed live send and receive smoke tests on a jailbroken PS5 using HTTP. A live chunked upload passed with its stored SHA-256 verified. HTTPS outbound passed a live upload to a self-signed test endpoint on the LAN. The PS5 system service returned the console name, the Media tile opened the dashboard, first-run PIN setup worked on hardware, and the official LocalSend app successfully sent an image in a prior build.
 
 ## License and source
 

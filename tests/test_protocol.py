@@ -348,6 +348,111 @@ class ProtocolTest(unittest.TestCase):
                 process.wait(timeout=5)
                 process.stderr.close()
 
+    def test_receive_folder_selection_persists_and_routes_uploads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            alternate = base / "other folder"
+            alternate.mkdir()
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            env = {**os.environ, "LOCALSEND_DIR": directory,
+                   "LOCALSEND_PORT": str(port), "LOCALSEND_PIN": "123456"}
+
+            def request(method, path, body=None, headers=None):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+                conn.request(method, path, body=body, headers=headers or {})
+                response = conn.getresponse()
+                result = response.status, response.read()
+                conn.close()
+                return result
+
+            def start():
+                process = subprocess.Popen([str(ROOT / "ps5-localsend.elf")], env=env,
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                for _ in range(100):
+                    if process.poll() is not None:
+                        self.fail(f"receiver exited early: {process.stderr.read()!r}")
+                    try:
+                        if request("GET", "/api/ui/status")[0] == 200:
+                            return process
+                    except OSError:
+                        time.sleep(0.05)
+                self.fail("receiver did not start")
+
+            def upload(name, content):
+                metadata = {"info": {"alias": "Test", "fingerprint": "other",
+                                     "version": "2.0", "port": 53317, "protocol": "http"},
+                            "files": {"id": {"id": "id", "fileName": name,
+                                             "size": len(content)}}}
+                status, body = request("POST", "/api/localsend/v2/prepare-upload",
+                                       json.dumps(metadata).encode())
+                self.assertEqual(status, 200, body)
+                prepared = json.loads(body)
+                path = "/api/localsend/v2/upload?" + urllib.parse.urlencode({
+                    "sessionId": prepared["sessionId"], "fileId": "id",
+                    "token": prepared["files"]["id"]})
+                self.assertEqual(request("POST", path, content)[0], 200)
+
+            headers = {"X-PS5-LocalSend": "1"}
+            form = lambda values: urllib.parse.urlencode(values).encode()
+            process = start()
+            try:
+                default = base / "drop"
+                (default / "previous.txt").write_bytes(b"old")
+                status, body = request("POST", "/api/ui/list", b"pin=123456")
+                self.assertEqual(status, 200)
+                old_listing = json.loads(body)
+                self.assertEqual(old_listing["receiveDir"], str(default))
+                old_id = next(iter(old_listing["files"]))
+                self.assertEqual(request("POST", "/api/ui/folders",
+                                         form({"path": directory}), headers)[0], 401)
+                self.assertEqual(request("POST", "/api/ui/receive-folder",
+                                         form({"pin": "123456", "path": str(alternate)}))[0], 403)
+                status, body = request("POST", "/api/ui/folders",
+                                       form({"pin": "123456", "path": directory}), headers)
+                self.assertEqual(status, 200)
+                self.assertIn("other folder", json.loads(body)["folders"])
+                for invalid in [str(base), str(base / "missing"), "relative/path"]:
+                    self.assertEqual(request("POST", "/api/ui/receive-folder",
+                                             form({"pin": "123456", "path": invalid}),
+                                             headers)[0], 400)
+                status, body = request("POST", "/api/ui/receive-folder",
+                                       form({"pin": "123456", "path": str(alternate)}), headers)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(json.loads(body)["receiveDir"], str(alternate))
+                setting = base / "receive-dir"
+                self.assertEqual(setting.read_text(), str(alternate) + "\n")
+                self.assertEqual(setting.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(request("GET", f"/api/localsend/v2/download?sessionId={old_listing['sessionId']}&fileId={old_id}")[0], 403)
+                upload("new.txt", b"new location")
+                self.assertFalse(list(default.glob("*-new.txt")))
+                self.assertEqual(next(alternate.glob("*-new.txt")).read_bytes(), b"new location")
+                status, body = request("POST", "/api/ui/list", b"pin=123456")
+                self.assertEqual(status, 200)
+                listing = json.loads(body)
+                self.assertEqual(listing["receiveDir"], str(alternate))
+                self.assertEqual([file["fileName"] for file in listing["files"].values()],
+                                 [next(alternate.glob("*-new.txt")).name])
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+
+            process = start()
+            try:
+                status, body = request("POST", "/api/ui/list", b"pin=123456")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["receiveDir"], str(alternate))
+                upload("after-restart.txt", b"still selected")
+                self.assertEqual(next(alternate.glob("*-after-restart.txt")).read_bytes(),
+                                 b"still selected")
+                self.assertFalse(list(default.glob("*-after-restart.txt")))
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+
     def test_new_instance_replaces_previous_process(self):
         with tempfile.TemporaryDirectory() as directory:
             def unused_port():

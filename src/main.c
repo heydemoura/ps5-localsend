@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
@@ -631,6 +632,80 @@ static int load_pin(void) {
   return 0;
 }
 
+/* Keep the receive location separate from the PIN hash so loader-provided PINs
+   can use the same persistent folder setting. Never expose this file as a download. */
+static int receive_dir_path(char *path, size_t cap) {
+  return pin_file_path(path, cap, "receive-dir");
+}
+
+static int resolve_receive_dir(const char *input, char *resolved, size_t cap,
+                               int check_writable) {
+  char canonical[PATH_MAX];
+  struct stat st;
+  if (input) for (const unsigned char *p = (const unsigned char *)input; *p; ++p)
+    if (*p < 0x20 || *p == 0x7f) return -1;
+  if (!input || input[0] != '/' || !realpath(input, canonical) ||
+      strlen(canonical) >= cap || !strcmp(canonical, "/") ||
+      stat(canonical, &st) < 0 || !S_ISDIR(st.st_mode)) return -1;
+  char base[PATH_MAX];
+  if (!realpath(output_dir, base) || !strcmp(canonical, base)) return -1;
+  if (check_writable) {
+    char probe[PATH_MAX], suffix[17];
+    random_hex(suffix, 8);
+    if (snprintf(probe, sizeof(probe), "%s/.localsend-%s.tmp", canonical, suffix) >=
+        (int)sizeof(probe)) return -1;
+    int fd = open(probe, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    int ok = close(fd) == 0;
+    if (unlink(probe) < 0) ok = 0;
+    if (!ok) return -1;
+  }
+  strcpy(resolved, canonical);
+  return 0;
+}
+
+static int load_receive_dir(void) {
+  char path[sizeof(output_dir) + 24], content[sizeof(drop_dir) + 2];
+  if (receive_dir_path(path, sizeof(path)) < 0) return -1;
+  int fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) return errno == ENOENT ? 0 : -1;
+  struct stat st;
+  ssize_t length = read(fd, content, sizeof(content) - 1);
+  int ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & 077) == 0 && length > 0 &&
+           length < (ssize_t)sizeof(content) - 1;
+  if (close(fd) < 0) ok = 0;
+  if (!ok) return -1;
+  content[length] = 0;
+  if (content[length-1] != '\n') return -1;
+  content[length-1] = 0;
+  char resolved[sizeof(drop_dir)];
+  if (resolve_receive_dir(content, resolved, sizeof(resolved), 1) < 0) return -1;
+  strcpy(drop_dir, resolved);
+  return 0;
+}
+
+static int save_receive_dir(const char *input) {
+  char resolved[sizeof(drop_dir)], path[sizeof(output_dir) + 24];
+  char temp[sizeof(output_dir) + 48], suffix[17];
+  if (resolve_receive_dir(input, resolved, sizeof(resolved), 1) < 0 ||
+      receive_dir_path(path, sizeof(path)) < 0) return -1;
+  random_hex(suffix, 8);
+  if (snprintf(temp, sizeof(temp), "%s/receive-dir.%s.tmp", output_dir, suffix) >=
+      (int)sizeof(temp)) return -1;
+  int fd = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  if (fd < 0) return -1;
+  size_t length = strlen(resolved);
+  int ok = write(fd, resolved, length) == (ssize_t)length &&
+           write(fd, "\n", 1) == 1 && fsync(fd) == 0;
+  if (close(fd) < 0) ok = 0;
+  if (ok && rename(temp, path) < 0) ok = 0;
+  if (!ok) { unlink(temp); return -1; }
+  strcpy(drop_dir, resolved);
+  memset(&downloads, 0, sizeof(downloads));
+  return 0;
+}
+
 static int acquire_instance_lock(void) {
   char path[sizeof(output_dir) + 24];
   const char *lock_dir = output_dir;
@@ -779,8 +854,68 @@ static void ui_list(int fd, const char *pin, struct in_addr peer) {
     if (n < 0 || (size_t)n >= sizeof(body) - used) { reply(fd, 500, NULL); return; }
     used += (size_t)n;
   }
-  if (used + 3 > sizeof(body)) { reply(fd, 500, NULL); return; }
-  memcpy(body + used, "]}", 3);
+  char receive_path[sizeof(drop_dir) * 2];
+  if (json_escape(drop_dir, receive_path, sizeof(receive_path)) < 0 ||
+      snprintf(body + used, sizeof(body) - used, "],\"receiveDir\":\"%s\"}",
+               receive_path) >= (int)(sizeof(body) - used)) {
+    reply(fd, 500, NULL); return;
+  }
+  reply(fd, 200, body);
+}
+
+static void ui_folders(int fd, const char *form) {
+  int status = check_pin(form);
+  if (status != 200) { reply(fd, status, NULL); return; }
+  char requested[sizeof(drop_dir)], canonical[PATH_MAX], path_json[PATH_MAX * 2];
+  if (query_value(form, "path", requested, sizeof(requested)) < 0 ||
+      requested[0] != '/' || !realpath(requested, canonical) ||
+      strlen(canonical) >= sizeof(drop_dir)) { reply(fd, 400, NULL); return; }
+  DIR *dir = opendir(canonical);
+  if (!dir) { reply(fd, 400, NULL); return; }
+  if (json_escape(canonical, path_json, sizeof(path_json)) < 0) {
+    closedir(dir); reply(fd, 500, NULL); return;
+  }
+  char parent[PATH_MAX];
+  strcpy(parent, canonical);
+  char *slash = strrchr(parent, '/');
+  if (slash && slash != parent) *slash = 0;
+  else strcpy(parent, "/");
+  char parent_json[PATH_MAX * 2];
+  if (json_escape(parent, parent_json, sizeof(parent_json)) < 0) {
+    closedir(dir); reply(fd, 500, NULL); return;
+  }
+  char body[32768];
+  int n = snprintf(body, sizeof(body),
+                   "{\"path\":\"%s\",\"parent\":\"%s\",\"folders\":[",
+                   path_json, parent_json);
+  if (n < 0 || (size_t)n >= sizeof(body)) {
+    closedir(dir); reply(fd, 500, NULL); return;
+  }
+  size_t used = (size_t)n;
+  int count = 0, truncated = 0;
+  struct dirent *entry;
+  while ((entry = readdir(dir))) {
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+    char child[PATH_MAX], name[768];
+    if (snprintf(child, sizeof(child), "%s%s%s", canonical,
+                 !strcmp(canonical, "/") ? "" : "/", entry->d_name) >=
+        (int)sizeof(child)) continue;
+    struct stat st;
+    if (stat(child, &st) < 0 || !S_ISDIR(st.st_mode) ||
+        json_escape(entry->d_name, name, sizeof(name)) < 0) continue;
+    if (count >= 64) { truncated = 1; break; }
+    n = snprintf(body + used, sizeof(body) - used, "%s\"%s\"",
+                 count ? "," : "", name);
+    if (n < 0 || (size_t)n >= sizeof(body) - used) {
+      closedir(dir); reply(fd, 500, NULL); return;
+    }
+    used += (size_t)n;
+    ++count;
+  }
+  closedir(dir);
+  n = snprintf(body + used, sizeof(body) - used, "],\"truncated\":%s}",
+               truncated ? "true" : "false");
+  if (n < 0 || (size_t)n >= sizeof(body) - used) { reply(fd, 500, NULL); return; }
   reply(fd, 200, body);
 }
 
@@ -964,6 +1099,30 @@ static void handle_http(int fd, struct in_addr peer) {
     ui_list(fd, form, peer);
     return;
   }
+  if (!strcmp(method, "POST") && !strcmp(target, "/api/ui/folders")) {
+    if (!header_is(header, "X-PS5-LocalSend", "1")) { reply(fd, 403, NULL); return; }
+    char form[sizeof(drop_dir) * 3];
+    if (read_form(fd, header, header + header_len, used - header_len,
+                  form, sizeof(form)) < 0) { reply(fd, 400, NULL); return; }
+    ui_folders(fd, form);
+    return;
+  }
+  if (!strcmp(method, "POST") && !strcmp(target, "/api/ui/receive-folder")) {
+    if (!header_is(header, "X-PS5-LocalSend", "1")) { reply(fd, 403, NULL); return; }
+    char form[sizeof(drop_dir) * 3], selected[sizeof(drop_dir)];
+    if (read_form(fd, header, header + header_len, used - header_len,
+                  form, sizeof(form)) < 0) { reply(fd, 400, NULL); return; }
+    int status = check_pin(form);
+    if (status != 200) { reply(fd, status, NULL); return; }
+    if (query_value(form, "path", selected, sizeof(selected)) < 0 ||
+        save_receive_dir(selected) < 0) { reply(fd, 400, NULL); return; }
+    char escaped[sizeof(drop_dir) * 2], body[sizeof(drop_dir) * 2 + 32];
+    if (json_escape(drop_dir, escaped, sizeof(escaped)) < 0 ||
+        snprintf(body, sizeof(body), "{\"receiveDir\":\"%s\"}", escaped) >=
+        (int)sizeof(body)) { reply(fd, 500, NULL); return; }
+    reply(fd, 200, body);
+    return;
+  }
   if (!pin_configured &&
       ((!strncmp(target, "/api/localsend/v2/", 18) &&
         strcmp(target, "/api/localsend/v2/info") &&
@@ -1096,6 +1255,10 @@ int main(int argc, char **argv) {
       lstat(drop_dir, &output_stat) < 0 || !S_ISDIR(output_stat.st_mode) ||
       chmod(drop_dir, 0700) < 0) {
     fprintf(stderr, "LocalSend drop directory must be a private directory\n"); return 1;
+  }
+  if (load_receive_dir() < 0) {
+    fprintf(stderr, "Configured LocalSend receive folder is unavailable or not writable\n");
+    return 1;
   }
   v = getenv("LOCALSEND_PIN");
   if (v && *v) {
